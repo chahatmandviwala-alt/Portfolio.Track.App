@@ -83,9 +83,9 @@ def _fetch_nse_quote(ticker: str) -> dict:
     with requests.Session() as session:
         session.headers.update(headers)
         # Obtain NSE session cookies before requesting the API.
-        session.get('https://www.nseindia.com/', timeout=9).raise_for_status()
+        session.get('https://www.nseindia.com/', timeout=(2, 4)).raise_for_status()
         response = session.get('https://www.nseindia.com/api/quote-equity',
-                               params={'symbol': symbol}, timeout=10)
+                               params={'symbol': symbol}, timeout=(2, 4))
         response.raise_for_status()
         data = response.json()
     returned_symbol = str((data.get('info') or {}).get('symbol') or symbol)
