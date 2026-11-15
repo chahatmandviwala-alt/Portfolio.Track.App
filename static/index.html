@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0c0d0f">
+  <meta name="description" content="Track your investments beautifully, in one place, privately.">
+  <title>Track — All your investments, one place.</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css?v=12">
+  <link rel="stylesheet" href="/static/theme.css?v=13">
+  <script>
+    // Keep the mobile browser's theme color in sync with the user's appearance setting.
+    (() => {
+      const root = document.documentElement;
+      const themeMeta = document.querySelector('meta[name="theme-color"]');
+      const syncBrowserTheme = () => {
+        if (themeMeta) themeMeta.content = root.dataset.theme === 'light' ? '#f0f3f9' : '#0c0d0f';
+      };
+      syncBrowserTheme();
+      new MutationObserver(syncBrowserTheme).observe(root, {
+        attributes: true,
+        attributeFilter: ['data-theme']
+      });
+    })();
+  </script>
+  <script>
+    // Show a compact date string while retaining real, accessible native pickers.
+    // This avoids the minimum intrinsic width of iOS Safari's date/time controls.
+    document.addEventListener('DOMContentLoaded', () => {
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const pickers = [...document.querySelectorAll('.date-input-wrap > input')];
+      const renderPicker = (input) => {
+        const display = input.previousElementSibling;
+        if (!display) return;
+        const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(input.value);
+        if (!match) {
+          display.textContent = input.type === 'date' ? 'Select date' : 'Select date & time';
+          display.classList.add('is-placeholder');
+          return;
+        }
+        const [, year, mm, dd, hh, min] = match;
+        const month = months[Number(mm) - 1];
+        if (!month) return;
+        display.textContent = input.type === 'date'
+          ? `${Number(dd)} ${month} ${year}`
+          : `${dd}/${mm}/${year.slice(2)} ${hh || '00'}:${min || '00'}`;
+        display.classList.remove('is-placeholder');
+      };
+      const sync = () => pickers.forEach(renderPicker);
+      for (const input of pickers) {
+        input.addEventListener('input', () => renderPicker(input));
+        input.addEventListener('change', () => renderPicker(input));
+      }
+      for (const formId of ['trade-form', 'edit-form']) {
+        document.getElementById(formId)?.addEventListener('reset', () => requestAnimationFrame(sync));
+      }
+      // The app fills the edit form programmatically before opening the dialog.
+      const dialog = document.getElementById('edit-dialog');
+      if (dialog) new MutationObserver(sync).observe(dialog, {
+        attributes: true, attributeFilter: ['open']
+      });
+      // The app can also fill the new-trade date before its view becomes active.
+      const tradeView = document.getElementById('view-trade');
+      if (tradeView) new MutationObserver(sync).observe(tradeView, {
+        attributes: true, attributeFilter: ['class']
+      });
+      sync();
+    });
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script defer src="/static/app.js?v=14"></script>
+</head>
+<body>
+  <div class="ambient ambient-left"></div><div class="ambient ambient-right"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="loader" class="app-loading"><div class="brand-logo"><span class="brand-mark"><span>&#10063;</span></span></div><b>Track.</b><span>Making your money make sense</span></div>
+  <main id="auth" class="auth-screen hidden">
+    <div class="auth-decoration"></div>
+    <div class="auth-content">
+      <div class="auth-icon"><span class="brand-mark"><span>&#10063;</span></span></div>
+      <h1>All your<br>investments.<br><em>One place.</em></h1>
+      <div class="auth-panel">
+        <div class="segmented"><button type="button" class="active" data-auth="login">Sign in</button><button type="button" data-auth="register">Create account</button></div>
+        <form id="auth-form">
+          <label>Username <input id="auth-username" autocomplete="username" required minlength="2" placeholder="yourname"></label>
+          <label>Password <input id="auth-password" type="password" autocomplete="current-password" required minlength="8" placeholder="At least 8 characters"></label>
+          <button class="primary-btn full" type="submit"><span id="auth-action">Sign in</span></button>
+        </form>
+        <div id="google-container"><div class="or-separator"><span>or continue with</span></div><a class="google-btn" href="/auth/google"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#4285F4" d="M21.35 12.2c0-.7-.06-1.37-.18-2.01H12v3.81h5.24a4.5 4.5 0 0 1-1.95 2.95v2.46h3.16c1.85-1.71 2.9-4.22 2.9-7.21Z"/><path fill="#34A853" d="M12 21.7c2.64 0 4.85-.87 6.46-2.29l-3.16-2.46c-.88.59-2 .95-3.3.95a5.8 5.8 0 0 1-5.47-4.04H3.28v2.53A9.7 9.7 0 0 0 12 21.7Z"/><path fill="#FBBC05" d="M6.53 13.86a5.85 5.85 0 0 1 0-3.72V7.61H3.28a9.7 9.7 0 0 0 0 8.78l3.25-2.53Z"/><path fill="#EA4335" d="M12 6.1c1.45 0 2.75.5 3.77 1.47l2.82-2.82C16.88 3.16 14.65 2.3 12 2.3a9.7 9.7 0 0 0-8.72 5.31l3.25 2.53A5.8 5.8 0 0 1 12 6.1Z"/></svg> Continue with Google</a></div>
+        <p id="google-hint" class="tiny muted hidden">Google sign-in can be enabled when you deploy this app.</p>
+      </div>
+      <p class="privacy-note">🔒 Your trades stay private to your account.</p>
+    </div>
+  </main>
+
+  <div id="app" class="site-shell hidden">
+    <header class="topbar">
+      <div class="top-brand"><div class="mini-brand"><span>&#10063;</span></div><span>track<span class="brand-dot">.</span></span></div>
+      <div class="top-actions"><button id="privacy-toggle" class="circle-btn" title="Show / hide amounts" aria-label="Show or hide amounts"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button><button class="avatar-btn" type="button" data-tab="account" aria-label="Account"><span id="avatar-char">U</span></button></div>
+    </header>
+    <div class="main-wrap">
+      <section id="view-home" class="view active" aria-label="Portfolio home">
+        <div class="hero">
+          <div class="eyebrow-row"><span class="eyebrow">TOTAL PORTFOLIO VALUE</span><button id="refresh-btn" type="button" class="refresh-icon" title="Refresh market prices" aria-label="Refresh market prices"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg></button></div>
+          <div class="balance-row"><h1 id="total-value" class="total-value">—</h1><span class="currency-pill" id="hero-ccy">SEK</span></div>
+          <div id="main-change" class="change-line"><span class="pnl-pill">—</span><span class="muted">Unrealized gain / loss</span></div>
+          <div class="chart-section"><div id="history-chart" class="history-chart" role="img" aria-label="Portfolio value over time"></div><div id="history-loading" class="chart-wait hidden"><span class="spinner"></span> Building portfolio history…</div></div>
+          <div class="range-row" id="ranges"><button class="selected" data-range="1M">1M</button><button data-range="3M">3M</button><button data-range="6M">6M</button><button data-range="1Y">1Y</button><button data-range="3Y">3Y</button><button data-range="MAX">MAX</button></div>
+        </div>
+        <div class="summary-strip"><div><span>Invested</span><strong id="invested-value">—</strong></div><div class="summary-divider"></div><div><span>Unrealized P/L</span><strong id="unrealized-value">—</strong></div><div class="summary-divider"></div><div><span>Holdings</span><strong id="holdings-count">—</strong></div></div>
+        <div class="section-heading"><div><p class="eyebrow">ASSETS <span class="section-count" id="holdings-badge">0</span></p></div><button class="text-link" data-tab="analytics">See all</button></div>
+        <div id="main-holdings" class="holdings-list"></div>
+      </section>
+
+      <section id="view-analytics" class="view" aria-label="Analytics">
+        <div class="page-heading"><h1>Portfolio <em>analytics.</em></h1></div>
+        <div class="section-card allocation-card">
+          <div class="card-top capital-header">
+            <div><p class="eyebrow">PORTFOLIO COMPOSITION</p></div>
+            <button id="capital-reset" class="capital-reset hidden" type="button" aria-label="Return to full capital allocation">← All assets</button>
+          </div>
+          <div id="capital-chart" class="capital-chart" role="group" aria-label="Interactive capital allocation treemap showing each asset by base-currency market value"></div>
+          <div class="capital-meta"><span id="capital-scope">Market value in base currency</span><span id="capital-hint">Select a tile to expand</span></div>
+        </div>
+        <div class="section-heading analytics-heading"><div><p class="eyebrow">DETAILED VIEW</p></div><span id="analytics-n" class="hint-tag"></span></div>
+        <div class="holdings-list" id="analytics-holdings"></div>
+      </section>
+
+      <section id="view-trade" class="view" aria-label="Add a trade">
+        <div class="page-heading"><h1>New <em>trade.</em></h1></div>
+        <div class="section-card form-card"><div class="buy-sell"><button type="button" id="side-buy" class="selected" data-side="BUY">Buy</button><button type="button" id="side-sell" data-side="SELL">Sell</button></div>
+        <form id="trade-form"><div class="field-grid"><label>Asset name <input name="asset" placeholder="e.g. APPLE" required></label><label>Ticker (yFinance) <input name="ticker" placeholder="e.g. AAPL"></label><label>Trade date <span class="date-input-wrap"><span class="date-display" aria-hidden="true">Select date</span><input type="date" name="trade_date" required></span></label><label>Asset class <select name="asset_type"><option>Stock</option><option>Fund</option><option>ETF</option><option>Crypto</option></select></label><label>Quantity <input type="number" name="quantity" min="0.00000001" step="any" placeholder="0.00" required></label><label>Price per unit <input type="number" name="price_trade_ccy" min="0" step="any" placeholder="0.00" required></label><label>Trade currency <input name="trade_ccy" value="USD" maxlength="4" required placeholder="USD"></label><label>Fees / brokerage <input type="number" name="charges_trade_ccy" min="0" step="any" value="0"></label><label>Tax / STT <input type="number" name="stt_trade_ccy" min="0" step="any" value="0"></label><label>FX to <span class="base-label">SEK</span> <input id="trade-manual-fx" type="number" name="fx_to_base" min="0.000000001" step="any" value="1" disabled></label></div><label class="toggle-label"><span><b>Automatic exchange rate</b></span><input id="trade-auto-fx" type="checkbox" checked><span class="switch"></span></label><div id="trade-total" class="trade-preview"><span>Trade value (excluding fees)</span><strong>—</strong></div><button type="submit" class="primary-btn full">Save trade</button></form></div>
+      </section>
+
+      <section id="view-history" class="view" aria-label="Trade history">
+        <div class="page-heading"><h1>Trade <em>history.</em></h1></div>
+        <div class="search-row"><div class="search-field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.8" cy="10.8" r="6.5"/><path d="m16 16 5 5"/></svg><input id="history-search" placeholder="Search assets, symbols, currency…" aria-label="Search trade history"></div><span id="trade-count" class="count-tag">0 trades</span></div>
+        <p class="list-hint">Tap a transaction to edit or delete it</p><div id="trades-list" class="trades-list"></div><button id="load-more-trades" class="outline-btn full hidden" type="button">Load more trades</button>
+      </section>
+
+      <section id="view-tax" class="view" aria-label="Tax and realized profit or loss">
+        <div class="page-heading"><h1>Realized <em>P/L.</em></h1></div>
+        <div class="section-card tax-card"><div class="tax-config"><label>Reporting period <select id="tax-period"><option value="ytd">Year to date</option><option value="lastyear">Last calendar year</option><option value="12m">Last 12 months</option><option value="custom">Custom range</option></select></label><label>Reporting currency <select id="tax-mode"><option value="base">Base currency</option><option value="trade">Trade currency</option></select></label></div><div id="tax-custom" class="tax-custom hidden"><label>From <input type="date" id="tax-start"></label><label>To <input type="date" id="tax-end"></label></div><div class="tax-total"><span>NET REALIZED P/L</span><strong id="tax-value">—</strong><small id="tax-dates">—</small></div><button id="tax-export" class="outline-btn full" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m-5-5 5 5 5-5M4 17v3h16v-3"/></svg>Export realized P/L CSV</button></div>
+        <div class="section-heading"><div><p class="eyebrow">CLOSED POSITIONS</p></div><span id="tax-count" class="hint-tag"></span></div><div id="tax-list" class="holdings-list"></div><p id="tax-note" class="footnote">FIFO calculations are informational and not tax advice.</p>
+      </section>
+
+      <section id="view-account" class="view" aria-label="Account and settings">
+        <div class="page-heading"><h1>Your <em>account.</em></h1></div>
+        <div class="profile-box"><div class="profile-avatar" id="profile-avatar">U</div><div><strong id="profile-name">Investor</strong><span id="profile-type">Private account</span></div><span class="secure-pill">● Secure</span></div>
+        <div class="account-section"><p class="eyebrow">PREFERENCES</p><div class="settings-box"><div class="setting-row"><div><strong>Base currency</strong><small>Value and performance in your currency</small></div><select id="base-select" aria-label="Base currency"><option>SEK</option><option>USD</option><option>EUR</option><option>INR</option><option>GBP</option><option>CHF</option><option>CAD</option><option>NOK</option><option>AUD</option><option>JPY</option><option>DKK</option><option>GBX</option></select></div><div class="setting-row"><div><strong>Appearance</strong><small>Choose a dark or light interface</small></div><div class="theme-switch" role="group" aria-label="Appearance"><button type="button" data-theme-choice="dark" aria-pressed="true">Dark</button><button type="button" data-theme-choice="light" aria-pressed="false">Light</button></div></div><div class="setting-row"><div><strong>Hide sensitive values</strong><small>Conceal amounts across the app</small></div><label class="toggle-compact"><input id="account-privacy" type="checkbox"><span class="switch"></span></label></div></div></div>
+        <div class="account-section"><p class="eyebrow">YOUR DATA</p><div class="settings-box"><label class="file-row" for="file-import"><span class="setting-icon">↑</span><span><strong>Upload / replace portfolio</strong><small>Import your existing trades CSV</small></span><span class="chevron">›</span><input type="file" accept=".csv,text/csv" id="file-import" class="visually-hidden"></label><button id="file-export" class="file-row" type="button"><span class="setting-icon">↓</span><span><strong>Download portfolio</strong><small>Export compatible CSV</small></span><span class="chevron">›</span></button></div></div>
+        <div class="account-section"><p class="eyebrow">SIGN IN</p><div class="settings-box"><div class="setting-row"><div><strong>Login method</strong><small id="account-login-method">Google or local account</small></div><span class="secure-pill">Connected</span></div><a id="account-google" class="file-row hidden" href="/auth/google"><span class="setting-icon">G</span><span><strong>Switch to Google sign-in</strong><small>Uses a separate Google account; export/import to move trades</small></span><span class="chevron">›</span></a><button id="logout-btn" type="button" class="file-row logout-row"><span class="setting-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/></svg></span><span><strong>Sign out</strong><small>End your current session</small></span><span class="chevron">›</span></button></div></div>
+        <p class="footnote">Prices are indicative. Market data and FX availability depend on upstream services; historical estimates are labeled. Export and back up your data regularly.</p>
+      </section>
+    </div>
+    <nav class="bottom-nav" aria-label="Main navigation">
+      <button type="button" class="nav-btn active" data-tab="home" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 10 9-7 9 7v10H3V10Z"/><path d="M9 20v-7h6v7"/></svg><span>Home</span></button>
+      <button type="button" class="nav-btn" data-tab="analytics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="5" rx="1"/><rect x="13" y="10" width="8" height="11" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/></svg><span>Analytics</span></button>
+      <button type="button" class="nav-btn" data-tab="trade"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg><span>New trade</span></button>
+      <button type="button" class="nav-btn" data-tab="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-7M3 3v5h5"/><path d="M12 7v5l4 3"/></svg><span>History</span></button>
+      <button type="button" class="nav-btn" data-tab="tax"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 2h12v20l-3-2-3 2-3-2-3 2V2Z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg><span>Tax</span></button>
+      <button type="button" class="nav-btn" data-tab="account"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3-7 8-7s8 3 8 7"/></svg><span>Account</span></button>
+    </nav>
+  </div>
+
+  <dialog id="edit-dialog" class="edit-dialog"><form id="edit-form"><div class="dialog-top"><div><p class="eyebrow">EDIT TRANSACTION</P></div><button class="x-btn" type="button" id="close-dialog" aria-label="Close">✕</button></div><div class="field-grid"><label>Asset <input name="asset" required></label><label>Ticker <input name="ticker"></label><label class="datetime-field">Trade date / time <span class="date-input-wrap"><span class="date-display" aria-hidden="true">Select date &amp; time</span><input name="trade_date" type="datetime-local" required></span></label><label>Type <select name="asset_type"><option>Stock</option><option>Fund</option><option>ETF</option><option>Crypto</option></select></label><label>Side <select name="side"><option>BUY</option><option>SELL</option></select></label><label>Quantity <input name="quantity" type="number" min="0.00000001" step="any" required></label><label>Unit price <input name="price_trade_ccy" type="number" min="0" step="any" required></label><label>Currency <input name="trade_ccy" required></label><label>Fees <input name="charges_trade_ccy" type="number" min="0" step="any"></label><label>Tax / STT <input name="stt_trade_ccy" type="number" min="0" step="any"></label><label>FX to base <input name="fx_to_base" type="number" min="0.000001" step="any" required></label><label>Last price (trade CCY) <input name="last_price_trade_ccy" type="number" min="0" step="any"></label></div><div class="dialog-buttons"><button id="delete-trade" type="button" class="danger-btn">Delete</button><button type="submit" class="primary-btn">Save changes</button></div></form></dialog>
+</body>
+</html>
