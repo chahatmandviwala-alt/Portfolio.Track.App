@@ -207,7 +207,7 @@ const localLogoByTicker = Object.freeze({
   '0P00000FYN.ST':'/static/logos/storebrand.png',
   '0P00005WD7.BO':'/static/logos/icici-prudential.png',
   'IKS.NS':'/static/logos/inventurus-knowledge-solutions.png',
-  'EGLN.L':'/static/logos/ishares.png'
+  'EGLNL.XC':'/static/logos/ishares.png'
 });
 const localLogoByName = new Map([
   ['Pareto Asset Management','/static/logos/pareto-asset-management.png'],
