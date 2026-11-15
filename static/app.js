@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const state = { user:null, dashboard:null, trades:[], history:{}, historyRange:'1M', view:'home',
   tradeSide:'BUY', authMode:'login', hidden:localStorage.getItem('track-private')==='true',
-  historyTime:{}, chart:null, capitalChart:null, capitalFocus:null, theme:localStorage.getItem('track-theme')==='light'?'light':'dark', tradeLimit:55, editId:null, lastTax:null, busy:false };
+  chart:null, capitalChart:null, capitalFocus:null, theme:localStorage.getItem('track-theme')==='light'?'light':'dark', tradeLimit:55, editId:null, lastTax:null, busy:false };
 const icons = { Stock:'S', Fund:'F', ETF:'E', Crypto:'₿' };
 const palette = { Stock:['#25344e','#78bdf0'], Fund:['#3c3450','#c3a7ed'], ETF:['#213c4c','#81cddd'], Crypto:['#3b3447','#e2b6cf'] };
 // Reference-inspired treemap: dark jewel tones alongside lighter pastel and bright tiles.
@@ -774,38 +774,27 @@ function renderChart(series){
 }
 async function loadRange(span){
   state.historyRange=span;document.querySelectorAll('[data-range]').forEach(el=>el.classList.toggle('selected',el.dataset.range===span));
-  if(state.history[span] && Date.now()-(state.historyTime[span]||0)<300000){renderChart(state.history[span]);return;}
+  if(state.history[span]){renderChart(state.history[span]);return;}
   $('history-loading').classList.remove('hidden');
   const key=span;
-  try{const data=await api('/api/history?span='+encodeURIComponent(span));state.history[key]=data;state.historyTime[key]=Date.now();
+  try{const data=await api('/api/history?span='+encodeURIComponent(span));state.history[key]=data;
     if(state.historyRange===span)renderChart(data);
   }catch(e){toast('Portfolio history: '+e.message,true);}
   finally{if(state.historyRange===span)$('history-loading').classList.add('hidden');}
 }
 async function reloadDashboard(showMessage=false){
   const d=await api('/api/dashboard');
-  if(state.dashboard && (state.dashboard.version!==d.version || state.dashboard.base_currency!==d.base_currency)){state.history={};state.historyTime={};}
+  if(state.dashboard && (state.dashboard.version!==d.version || state.dashboard.base_currency!==d.base_currency))state.history={};
   state.dashboard=d;renderDashboard();renderAnalytics();
   if(showMessage){toast(d.warnings.length?'Updated. '+d.warnings[0]:'Portfolio updated');}
   if(state.view==='home')loadRange(state.historyRange);
 }
 async function refreshPortfolio(){
   const btn=$('refresh-btn');btn.classList.add('is-refreshing');btn.disabled=true;
-  try{
-    const result=await api('/api/refresh',{method:'POST'});
-    if(result.dashboard){
-      // Refresh already committed quotes and computed the dashboard, so no second
-      // /api/dashboard request is needed. Daily-close history does not use LTP.
-      state.dashboard=result.dashboard;
-      renderDashboard();renderAnalytics();
-      if(state.view==='home')loadRange(state.historyRange);
-    }else{
-      await reloadDashboard(); // Compatibility with older servers / empty portfolio.
-    }
+  try{const result=await api('/api/refresh',{method:'POST'});await reloadDashboard();
     const failures=Object.keys(result.errors||{});
-    toast(`Updated ${result.updated}/${result.requested??0} latest prices${failures.length?`; unavailable: ${failures.join(', ')}`:''}`,!!failures.length);
-  }catch(e){toast(e.message,true);}
-  finally{btn.classList.remove('is-refreshing');btn.disabled=false;}
+    toast(`Updated ${result.updated}/${result.requested??0} latest prices${failures.length?`; unavailable: ${failures.join(', ')}`:''}`,!!failures.length);}
+  catch(e){toast(e.message,true);}finally{btn.classList.remove('is-refreshing');btn.disabled=false;}
 }
 function formTrade(form){const fd=new FormData(form);const val=Object.fromEntries(fd.entries());
   for(const f of ['quantity','price_trade_ccy','charges_trade_ccy','stt_trade_ccy','fx_to_base','last_price_trade_ccy','last_price_base'])val[f]=Number(val[f]??(f==='fx_to_base'?1:0));
