@@ -11,9 +11,6 @@ fallback timeouts. External quote services are best effort, not real-time feeds.
 from __future__ import annotations
 
 import copy
-import csv
-import io
-import zipfile
 import hashlib
 import json
 import logging
@@ -23,7 +20,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone, time as daytime
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -35,8 +32,6 @@ _LOG = logging.getLogger('uvicorn.error')
 HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; PortfolioTracker/1.0)', 'Accept': 'application/json'}
 _HIST_REFRESH_HOURS = max(1., float(os.getenv('HISTORICAL_REFRESH_HOURS', '12')))
 _FX_REFRESH_HOURS = max(1., float(os.getenv('FX_REFRESH_HOURS', '12')))
-_NSE_OFFICIAL_CLOSE = os.getenv('NSE_OFFICIAL_CLOSE', '1').strip().lower() not in ('0', 'false', 'no')
-_NSE_EOD_COOLDOWN = max(120, int(os.getenv('NSE_EOD_COOLDOWN_SECONDS', '900')))
 _QUOTE_TTL = max(0, int(os.getenv('QUOTE_CACHE_SECONDS', '30')))
 _NSE_COOLDOWN = max(60, int(os.getenv('NSE_COOLDOWN_SECONDS', '1800')))
 _MAX_WORKERS = max(2, min(12, int(os.getenv('MARKET_FETCH_WORKERS', '8'))))
@@ -52,12 +47,10 @@ class _CacheRecord:
     values: dict
 
 _cache_lock = threading.RLock()
-_local_rows: OrderedDict[str, tuple[float, _CacheRecord | None]] = OrderedDict()
+_local_rows: OrderedDict[str, tuple[float, _CacheRecord]] = OrderedDict()
 _quote_rows: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _chart_rows: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
 _nse_block_until = 0.0
-_nse_eod_block_until = 0.0
-_nse_eod_missing_dates: dict[str, float] = {}
 _http_local = threading.local()
 
 
@@ -83,8 +76,7 @@ def _read_cached(keys: list[str]) -> dict[str, _CacheRecord]:
         for key in dict.fromkeys(keys):
             hit = _local_rows.get(key)
             if hit and hit[0] > now:
-                if hit[1] is not None:
-                    found[key] = hit[1]
+                found[key] = hit[1]
                 _local_rows.move_to_end(key)
             else:
                 missing.append(key)
@@ -106,11 +98,9 @@ def _read_cached(keys: list[str]) -> dict[str, _CacheRecord]:
                     continue
         with _cache_lock:
             for key in missing:
-                # Cache database misses too: a first request often needs both
-                # prices and FX and should not perform another SELECT for each.
-                item = found.get(key)
-                _local_rows[key] = (now + (300 if item is not None else 30), item)
-                _local_rows.move_to_end(key)
+                if key in found:
+                    _local_rows[key] = (now + 60, found[key])
+                    _local_rows.move_to_end(key)
             while len(_local_rows) > 350:
                 _local_rows.popitem(last=False)
     return found
@@ -147,7 +137,7 @@ def _write_cached(rows: dict[str, _CacheRecord]) -> None:
     with _cache_lock:
         now = time.monotonic()
         for key, item in rows.items():
-            _local_rows[key] = (now + 300, item)
+            _local_rows[key] = (now + 60, item)
             _local_rows.move_to_end(key)
         while len(_local_rows) > 350:
             _local_rows.popitem(last=False)
@@ -248,237 +238,6 @@ def _positive_price(value) -> float | None:
     return round(price, 8) if np.isfinite(price) and price > 0 else None
 
 
-# Official NSE *closing* prices are different from the last traded price.
-# A single daily exchange file covers all .NS stocks and can be cached across
-# portfolios. Only use it when the Indian market is not in its trading session.
-_IST = timezone(timedelta(hours=5, minutes=30), name='IST')
-
-
-def _nse_trading_window(now: datetime | None = None) -> bool:
-    """Conservative: use intraday quotes until the close is fully published."""
-    now = now or datetime.now(_IST)
-    if now.tzinfo is None:
-        raise ValueError('An offset-aware IST datetime is required')
-    now = now.astimezone(_IST)
-    return now.weekday() < 5 and daytime(9, 15) <= now.time() < daytime(17, 0)
-
-
-def _nse_report_dates(now: datetime | None = None) -> list[date]:
-    """Recent candidate NSE reports, never today's before its publication window."""
-    now = (now or datetime.now(_IST)).astimezone(_IST)
-    target = now.date()
-    if now.time() < daytime(17, 0):
-        target -= timedelta(days=1)
-    out = []
-    for offset in range(10):
-        day = target - timedelta(days=offset)
-        if day.weekday() < 5:
-            out.append(day)
-        if len(out) == 5:
-            break
-    return out
-
-
-def _parse_nse_bhavcopy(content: bytes, report_day: date) -> dict[str, float]:
-    """Parse the NSE UDiFF equity bhavcopy; use ClsPric, never LastPric.
-
-    Restricts archive size and validates column names, security series and
-    business date. Malformed reports must not be cached as authoritative.
-    """
-    if not content or len(content) > 5_000_000:
-        raise ValueError('Unexpected NSE report size')
-    with zipfile.ZipFile(io.BytesIO(content)) as archive:
-        names = [i for i in archive.infolist() if i.filename.lower().endswith('.csv') and not i.is_dir()]
-        if len(names) != 1 or names[0].file_size > 10_000_000:
-            raise ValueError('Unexpected NSE report contents')
-        with archive.open(names[0]) as raw:
-            reader = csv.DictReader(io.TextIOWrapper(raw, encoding='utf-8-sig', newline=''))
-            fields = set(reader.fieldnames or [])
-            required = {'TckrSymb', 'SctySrs', 'ClsPric'}
-            if not required <= fields or not ({'TradDt', 'BizDt'} & fields):
-                raise ValueError('NSE close columns absent from report')
-            quotes: dict[str, tuple[int, float]] = {}
-            for row in reader:
-                symbol = str(row.get('TckrSymb') or '').strip().upper()
-                series = str(row.get('SctySrs') or '').strip().upper()
-                if not symbol or not series or len(symbol) > 40:
-                    continue
-                raw_day = str(row.get('TradDt') or row.get('BizDt') or '').strip()
-                if not raw_day:
-                    continue
-                parsed = None
-                for fmt in ('%Y-%m-%d', '%d-%b-%Y', '%d/%m/%Y', '%Y%m%d'):
-                    try:
-                        parsed = datetime.strptime(raw_day[:11] if fmt == '%d-%b-%Y' else raw_day[:10], fmt).date()
-                        break
-                    except ValueError:
-                        pass
-                if parsed != report_day:
-                    # Never insert another day's price into a cached snapshot.
-                    continue
-                value = _positive_price(row.get('ClsPric'))
-                if value is None:
-                    continue
-                rank = {'EQ': 0, 'BE': 1, 'BZ': 2, 'SM': 3}.get(series, 9)
-                if symbol not in quotes or rank < quotes[symbol][0]:
-                    quotes[symbol] = (rank, value)
-    if not quotes:
-        raise ValueError('NSE report contained no valid official closing prices')
-    return {sym: val for sym, (_, val) in quotes.items()}
-
-
-def _parse_nse_full_csv(content: bytes, report_day: date) -> dict[str, float]:
-    """Official NSE full bhavcopy fallback; CLOSE_PRICE != LAST_PRICE."""
-    if not content or len(content) > 2_000_000:
-        raise ValueError('Unexpected full bhavcopy size')
-    text = content.decode('utf-8-sig')
-    reader = csv.DictReader(io.StringIO(text, newline=''))
-    if not {'SYMBOL', 'SERIES', 'DATE1', 'CLOSE_PRICE'} <= set(reader.fieldnames or []):
-        raise ValueError('Full bhavcopy header is invalid')
-    prices = {}
-    for row in reader:
-        symbol = str(row.get('SYMBOL') or '').strip().upper()
-        series = str(row.get('SERIES') or '').strip().upper()
-        raw_day = str(row.get('DATE1') or '').strip()
-        parsed = None
-        for fmt in ('%d-%b-%Y', '%d-%b-%y', '%Y-%m-%d'):
-            try:
-                parsed = datetime.strptime(raw_day, fmt).date()
-                break
-            except ValueError:
-                pass
-        if parsed != report_day or not symbol:
-            continue
-        price = _positive_price(row.get('CLOSE_PRICE'))
-        if price is None:
-            continue
-        rank = {'EQ': 0, 'BE': 1, 'BZ': 2, 'SM': 3}.get(series, 9)
-        existing = prices.get(symbol)
-        if existing is None or rank < existing[0]:
-            prices[symbol] = (rank, price)
-    if not prices:
-        raise ValueError('No official NSE close prices in full bhavcopy')
-    return {sym: value for sym, (_, value) in prices.items()}
-
-
-def _download_nse_bhavcopy(day: date) -> dict[str, float]:
-    """Use compressed UDiFF file, falling back to official full CSV on 404.
-
-    NSE can reject calls from hosted cloud IPs. Do not substitute an intraday
-    value and call it a close when its authoritative reports are unreachable.
-    """
-    name = f'BhavCopy_NSE_CM_0_0_0_{day:%Y%m%d}_F_0000.csv.zip'
-    url = f'https://nsearchives.nseindia.com/content/cm/{name}'
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Accept': 'application/zip,text/csv,*/*',
-        'Referer': 'https://www.nseindia.com/',
-    }
-    response = _http().get(url, headers=headers, timeout=(2.0, 4.0))
-    if response.status_code == 404:
-        # Published alternative equity report (same exchange, not a third party).
-        alternate = f'https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{day:%d%m%Y}.csv'
-        fallback = _http().get(alternate, headers=headers, timeout=(2.0, 4.0))
-        fallback.raise_for_status()
-        return _parse_nse_full_csv(fallback.content, day)
-    response.raise_for_status()
-    return _parse_nse_bhavcopy(response.content, day)
-
-
-def _load_latest_nse_eod() -> tuple[date | None, dict[str, float]]:
-    """Return latest official close for every NSE equity via one shared file.
-
-    DB rows are PUBLIC market data, not a user portfolio. Fail closed to the
-    existing quote provider if the exchange blocks cloud traffic.
-    """
-    global _nse_eod_block_until
-    days = _nse_report_dates()
-    now = time.monotonic()
-    keys = {day: 'nse:close:' + day.strftime('%Y%m%d') for day in days}
-    cached = _read_cached(list(keys.values()))
-    for day in days:
-        key = keys[day]
-        item = cached.get(key)
-        if item and item.values:
-            return day, dict(item.values)
-        with _cache_lock:
-            if now < _nse_eod_block_until:
-                return None, {}
-            if now < _nse_eod_missing_dates.get(key, 0):
-                # A missing report can be due to a market holiday. Try older.
-                continue
-        try:
-            begin = time.perf_counter()
-            prices = _download_nse_bhavcopy(day)
-            _write_cached({key: _CacheRecord(day, day, datetime.now(timezone.utc), prices)})
-            _LOG.info('market.nse_official_close seconds=%.2f day=%s symbols=%d',
-                      time.perf_counter() - begin, day, len(prices))
-            return day, prices
-        except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code in (404, 410):
-                with _cache_lock:
-                    _nse_eod_missing_dates[key] = now + 1200
-                # On a normal weekday after close, a not-yet-published
-                # report must NOT turn yesterday's close into today's quote.
-                if day == datetime.now(_IST).date():
-                    break
-                continue
-            with _cache_lock:
-                _nse_eod_block_until = now + _NSE_EOD_COOLDOWN
-            _LOG.warning('NSE official EOD feed unavailable (%s); using marked fallback', type(exc).__name__)
-            break
-        except (requests.RequestException, ValueError, zipfile.BadZipFile, OSError) as exc:
-            with _cache_lock:
-                _nse_eod_block_until = now + _NSE_EOD_COOLDOWN
-            _LOG.warning('NSE official EOD feed unavailable (%s); using marked fallback', type(exc).__name__)
-            break
-        except Exception:
-            # Do not allow a transient Supabase cache failure to block prices.
-            _LOG.exception('NSE report cache failure')
-            break
-    return None, {}
-
-
-def _nse_official_quotes(tickers: list[str]) -> dict[str, dict]:
-    if not tickers or not _NSE_OFFICIAL_CLOSE or _nse_trading_window():
-        return {}
-    try:
-        day, closes = _load_latest_nse_eod()
-    except Exception:
-        _LOG.exception('Unable to retrieve NSE closing prices; using fallback')
-        return {}
-    if not day:
-        return {}
-    return {
-        ticker: {'price': closes[ticker[:-3].upper()],
-                 'source': 'NSE official closing price (EOD)',
-                 'as_of': day.isoformat()}
-        for ticker in tickers if ticker.upper().endswith('.NS')
-        and ticker[:-3].upper() in closes
-    }
-
-
-def _overlay_official_nse_history(prices: dict, end: date) -> dict:
-    """Correct the most recent NSE daily close when official data is cached.
-
-    A chart should not silently mix Yahoo's last-trade value into its official
-    closing value for the most recent completed NSE session. Does not fetch a
-    new NSE report itself: refresh may already have loaded/cached the snapshot.
-    """
-    if not _NSE_OFFICIAL_CLOSE or not any(t.upper().endswith('.NS') for t in prices):
-        return prices
-    candidate_days = _nse_report_dates()
-    snapshot = _read_cached(['nse:close:' + d.strftime('%Y%m%d') for d in candidate_days])
-    for d in candidate_days:
-        record = snapshot.get('nse:close:' + d.strftime('%Y%m%d'))
-        if record and record.values and d <= end:
-            for ticker, values in prices.items():
-                if ticker.upper().endswith('.NS') and ticker[:-3].upper() in record.values:
-                    values[d.isoformat()] = float(record.values[ticker[:-3].upper()])
-            break
-    return prices
-
-
 def _fetch_nse_quote(ticker: str) -> dict:
     """NSE live quote. A cloud-host block activates a short circuit breaker."""
     global _nse_block_until
@@ -513,7 +272,7 @@ def _fetch_nse_quote(ticker: str) -> dict:
     price = _positive_price((data.get('priceInfo') or {}).get('lastPrice'))
     if price is None:
         raise ValueError('NSE returned no valid last traded price')
-    return {'price': price, 'source': 'NSE India last traded price',
+    return {'price': price, 'source': 'NSE India',
             'as_of': str((data.get('metadata') or {}).get('lastUpdateTime') or '')}
 
 
@@ -538,7 +297,7 @@ def _fetch_yahoo_latest(ticker: str) -> dict:
     else:
         timestamps = info.get('timestamp') or []
         as_of = datetime.fromtimestamp(timestamps[-1], timezone.utc).isoformat() if timestamps else ''
-    return {'price': price, 'source': 'Yahoo Finance intraday' + (' (not NSE official close)' if ticker.upper().endswith('.NS') else ''), 'as_of': as_of}
+    return {'price': price, 'source': 'Yahoo Finance intraday', 'as_of': as_of}
 
 
 def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
@@ -549,11 +308,10 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
     """
     names = list(dict.fromkeys(t.strip() for t in tickers if t and t.strip()))
     quotes, errors, missing = {}, {}, []
-    mode = 'live' if _nse_trading_window() else 'eod'
     now = time.monotonic()
     with _cache_lock:
         for ticker in names:
-            cached = _quote_rows.get(mode + ':' + ticker)
+            cached = _quote_rows.get(ticker)
             if cached and cached[0] > now:
                 quotes[ticker] = dict(cached[1])
             else:
@@ -571,17 +329,7 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
         raise ValueError(' and '.join(causes) + ' unavailable')
 
     if missing:
-        # One archived NSE close replaces dozens of independent Yahoo queries
-        # when the Indian market is closed. Outside coverage retain fallback.
-        official = _nse_official_quotes([t for t in missing if t.upper().endswith('.NS')])
-        quotes.update(official)
-        missing = [t for t in missing if t not in official]
-        if official and _QUOTE_TTL:
-            with _cache_lock:
-                for ticker, quote in official.items():
-                    _quote_rows[mode + ':' + ticker] = (now + _QUOTE_TTL, dict(quote))
         begin = time.perf_counter()
-    if missing:
         with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(missing))) as pool:
             futures = {pool.submit(fetch, ticker): ticker for ticker in missing}
             for future in as_completed(futures):
@@ -591,8 +339,8 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
                     quotes[ticker] = quote
                     if _QUOTE_TTL:
                         with _cache_lock:
-                            _quote_rows[mode + ':' + ticker] = (time.monotonic() + _QUOTE_TTL, dict(quote))
-                            _quote_rows.move_to_end(mode + ':' + ticker)
+                            _quote_rows[ticker] = (time.monotonic() + _QUOTE_TTL, dict(quote))
+                            _quote_rows.move_to_end(ticker)
                             while len(_quote_rows) > 200:
                                 _quote_rows.popitem(last=False)
                 except Exception as exc:
@@ -783,13 +531,8 @@ def portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
     if span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
         raise ValueError('Unsupported range')
     try:
-        # Only history valuation inputs determine this digest. Live quotes do
-        # not enter _calculate_portfolio_history, so they must not invalidate it.
-        history_cols = ['trade_date', 'asset', 'side', 'quantity', 'ticker',
-                        'trade_ccy', 'price_trade_ccy', 'fx_to_base']
-        digest = hashlib.blake2b(
-            pd.util.hash_pandas_object(df[history_cols], index=True).values.tobytes(),
-            digest_size=16).hexdigest()
+        digest = hashlib.blake2b(pd.util.hash_pandas_object(df, index=True).values.tobytes(),
+                                 digest_size=16).hexdigest()
     except (TypeError, ValueError):
         return _calculate_portfolio_history(df, base, span)
     key = (base, span, date.today().isoformat(), digest)
@@ -800,7 +543,7 @@ def portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
             return copy.deepcopy(hit[1])
     result = _calculate_portfolio_history(df, base, span)
     with _cache_lock:
-        _chart_rows[key] = (time.monotonic() + 300, copy.deepcopy(result))
+        _chart_rows[key] = (time.monotonic() + 120, copy.deepcopy(result))
         while len(_chart_rows) > 30:
             _chart_rows.popitem(last=False)
     return result
@@ -837,25 +580,10 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
         ccys.append(ccy)
     market_start = start - timedelta(days=10)
     begin = time.perf_counter()
-    # One Supabase SELECT for both Yahoo-price and FX cache keys. Negative
-    # cache entries prevent two redundant queries on the first cold request.
-    price_keys = {'price:' + t for t in tickers if t}
-    fx_keys = {f'fx:{ccy}:{base}' for ccy in ccys if ccy != base}
-    if price_keys or fx_keys:
-        _read_cached(sorted(price_keys | fx_keys))
-    if price_keys and fx_keys:
-        # Network misses for prices and FX are independent: run simultaneously.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            pjob = pool.submit(get_prices, tickers, market_start, end)
-            fjob = pool.submit(get_fx_series, ccys, base, market_start, end)
-            prices, price_errors = pjob.result()
-            fxs, fx_errors = fjob.result()
-    else:
-        prices, price_errors = get_prices(tickers, market_start, end)
-        fxs, fx_errors = get_fx_series(ccys, base, market_start, end)
-    prices_elapsed = time.perf_counter() - begin
-    fx_elapsed = 0.0  # concurrent, included in wall-clock time above
-    prices = _overlay_official_nse_history(prices, end)
+    prices,price_errors = get_prices(tickers,market_start,end)
+    prices_elapsed = time.perf_counter()-begin
+    fxs,fx_errors = get_fx_series(ccys,base,market_start,end)
+    fx_elapsed = time.perf_counter()-begin-prices_elapsed
     trade_price_by_asset = {}
     for asset,g in df.groupby('asset'):
         purchase = g[['trade_date','price_trade_ccy']].copy()
@@ -909,4 +637,4 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     return {'points':points,'range':span,'warnings':warnings,
             'estimated_assets':sorted(set(estimated_assets)),
             'excluded_assets':sorted(set(unknown_assets)),
-            'price_count':len(prices),'source':'Yahoo Finance daily closes (latest cached NSE official close applied when available) + Frankfurter FX; trade-price estimates flagged'}
+            'price_count':len(prices),'source':'Yahoo Finance daily closes + Frankfurter FX; trade-price estimates flagged'}

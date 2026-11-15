@@ -3,8 +3,6 @@ from __future__ import annotations
 import csv
 from datetime import date,datetime,timedelta,timezone
 from io import StringIO
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 import hashlib,base64,hmac,os,re,secrets
 from pathlib import Path
 import uuid
@@ -66,15 +64,8 @@ def get_owned(user:str,db:DBSession)->Portfolio:
     return get_portfolio(db,user)
 
 
-@lru_cache(maxsize=8)
-def _parsed_trades(csv_text: str) -> pd.DataFrame:
-    """Parse identical trade CSVs once per process. Never mutate this frame."""
-    return engine.read_trades(csv_text)
-
-
-def data_for(p: Portfolio) -> pd.DataFrame:
-    # Routes edit rows in-place; a copy prevents cross-request/account mutation.
-    return _parsed_trades(p.csv_text).copy(deep=True)
+def data_for(p:Portfolio)->pd.DataFrame:
+    return engine.read_trades(p.csv_text)
 
 
 def save_data(db:DBSession,p:Portfolio,d:pd.DataFrame):
@@ -173,13 +164,11 @@ async def google_callback(request:Request,db:DBSession=Depends(db_dep)):
     request.session.clear();request.session['user']=key
     return RedirectResponse('/',status_code=303)
 
-def _dashboard_payload(p: Portfolio, d: pd.DataFrame,
-                       preloaded_spot: tuple[dict, list] | None = None) -> dict:
-    """Original dashboard calculations; optionally reuse a concurrent FX fetch."""
+@app.get('/api/dashboard')
+def dashboard(request:Request,user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
+    p=get_owned(user,db);d=data_for(p)
     ccys=d.trade_ccy.unique().tolist() if not d.empty else []
-    fx,fxwarns=(preloaded_spot if preloaded_spot is not None else
-                (market.spot_rates(ccys,p.base_currency) if ccys else ({},[])))
-    fx,fxwarns=dict(fx),list(fxwarns)
+    fx,fxwarns=market.spot_rates(ccys,p.base_currency) if ccys else ({},[])
     # Outage fallback: use an *explicitly labeled* recorded transaction FX rate,
     # never an arbitrary 1.0 for a cross-currency conversion.
     for ccy in ccys:
@@ -194,12 +183,6 @@ def _dashboard_payload(p: Portfolio, d: pd.DataFrame,
     out['trades_count']=len(d)
     out['version']=p.version
     return out
-
-
-@app.get('/api/dashboard')
-def dashboard(request:Request,user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
-    p=get_owned(user,db)
-    return _dashboard_payload(p,data_for(p))
 
 @app.get('/api/history')
 def history(span:str=Query('1M'),user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
@@ -359,17 +342,7 @@ def refresh(request:Request,user:str=Depends(session_user),db:DBSession=Depends(
     if d.empty:return {'updated':0,'errors':[]}
     active=engine.summarize(d,p.base_currency,{})['holdings']
     tickers=sorted(set(r['ticker'] for r in active if r['ticker']))
-    currencies=d.trade_ccy.unique().tolist()
-    # Latest price and spot FX providers are independent network operations.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        spot_future=pool.submit(market.spot_rates,currencies,p.base_currency)
-        quotes,errors=market.get_latest_prices(tickers)
-        try:
-            spot=spot_future.result()
-        except Exception:
-            # Live quote refresh still succeeds if the independent FX feed fails.
-            # The browser falls back to the original GET /api/dashboard path.
-            spot=None
+    quotes,errors=market.get_latest_prices(tickers)
     updated=0
     if quotes:
         # Imported CSV columns may be inferred as integer; latest quotes are fractional.
@@ -379,19 +352,7 @@ def refresh(request:Request,user:str=Depends(session_user),db:DBSession=Depends(
         if mask.any():
             d.loc[mask,'last_price_trade_ccy']=quote['price']
             updated+=1
-    if updated:
-        save_data(db,p,d)
-        # Reparse the persisted CSV: dashboard then uses exactly the same
-        # float precision as a separate GET /api/dashboard would have used.
-        d=data_for(p)
-    response={'updated':updated,'requested':len(tickers),
-              'quotes':{ticker:{'source':q['source'],'as_of':q['as_of']} for ticker,q in quotes.items()},
-              'errors':errors}
-    if spot is not None:
-        try:
-            response['dashboard']=_dashboard_payload(p,d,preloaded_spot=spot)
-        except Exception:
-            # Do not turn a successful quote update into a failed POST if
-            # dashboard processing fails; use the existing frontend fallback.
-            pass
-    return response
+    if updated:save_data(db,p,d)
+    return {'updated':updated,'requested':len(tickers),
+            'quotes':{ticker:{'source':q['source'],'as_of':q['as_of']} for ticker,q in quotes.items()},
+            'errors':errors}
