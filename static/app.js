@@ -757,11 +757,11 @@ function renderChart(series){
   if(typeof echarts==='undefined'){
     const ys=data.map(p=>p[1]);const min=Math.min(...ys);const max=Math.max(...ys);const width=640,height=230,pad=12;
     const path=ys.map((y,i)=>`${i?'L':'M'} ${(i/(ys.length-1||1)*width).toFixed(1)} ${(height-pad-(y-min)/(max-min||1)*(height-2*pad)).toFixed(1)}`).join(' ');
-    target.innerHTML=`<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:100%" preserveAspectRatio="none" role="img"><path d="${path}" fill="none" stroke="#55b8ed" stroke-width="3" vector-effect="non-scaling-stroke"/></svg>`;return;
+    target.innerHTML=`<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:100%" preserveAspectRatio="none" role="img"><path d="${path}" fill="none" stroke="#59e4fc" stroke-width="3" vector-effect="non-scaling-stroke"/></svg>`;return;
   }
   if(!state.chart)state.chart=echarts.init(target);
   const rising=data[data.length-1][1]>=data[0][1];
-  const color=rising?'#55b8ed':'#ed919b';
+  const color=rising?'#59e4fc':'#ed919b';
   state.chart.setOption({animationDuration:340,grid:{left:4,right:5,top:16,bottom:12,containLabel:false},
     xAxis:{type:'time',boundaryGap:false,axisLine:{show:false},axisTick:{show:false},axisLabel:{show:false},splitLine:{show:false},min:data[0][0],max:data[data.length-1][0]},
     yAxis:{type:'value',scale:true,axisLabel:{show:false},axisLine:{show:false},axisTick:{show:false},splitLine:{show:false}},
