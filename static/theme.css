@@ -7,7 +7,7 @@ html[data-theme="dark"] {
   --ink: #edf3fc;
   --muted: #a8b2c0;
   --line: #30343b;
-  --green: #55b8ed;
+  --green: #58e3fb;
   --green-soft: #1b303e;
   --red: #ed919b;
   --red-soft: #3d272d;
@@ -21,7 +21,7 @@ html[data-theme="dark"] {
   --border: #343941;
   --text: #edf3fc;
   --subtle: #a9b4c1;
-  --accent: #55b8ed;
+  --accent: #58e3fb;
   --accent-soft: #193646;
   --positive: #79c6ac;
   --negative: #ed919b;
