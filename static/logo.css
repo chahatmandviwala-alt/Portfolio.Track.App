@@ -1,0 +1,31 @@
+/* Custom logo. Loaded AFTER theme.css so it overrides the green/blue tile
+   and the ❏ glyph styling. Logo file: static/logos/logo.png */
+
+/* remove the coloured tile, tilt and rounding behind the old glyph */
+.top-brand .mini-brand,
+.app-loading > .brand-logo,
+.auth-icon {
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  border-radius: 0 !important;
+}
+
+/* sizes: top bar / loading screen / sign-in screen */
+.top-brand .mini-brand { width: 36px; height: 36px; }
+.app-loading > .brand-logo { width: 84px; height: 84px; }
+.auth-icon { width: 64px; height: 64px; }
+@media (max-width: 700px) {
+  .top-brand .mini-brand { width: 30px; height: 30px; }
+}
+
+/* the image fills its box without stretching */
+.brand-mark { display: block; width: 100%; height: 100%; font-size: 0; }
+.mini-brand img,
+.brand-logo img,
+.auth-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
