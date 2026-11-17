@@ -197,25 +197,7 @@ const yahooLogoMarkets = Object.freeze({
 });
 // The legacy country keys used by the existing Indian/Swedish name aliases.
 const catalogMarket = market => market==='se'?'sweden':market;
-// Updated provider: the old MrChartist/global-stock-logos repository is gone.
-// Qualify symbols by exchange when the market is known; do not silently use
-// a US company with a coinciding symbol for European/Indian holdings.
-const stockLogoExchangeByMarket=Object.freeze({
-  in:'NSE',se:'OMXSTO',germany:'XETRA',france:'EPA',netherlands:'AMS',
-  finland:'HEL',denmark:'CPH',norway:'OSL',uk:'LON',italy:'MIL',
-  spain:'BME',switzerland:'SIX',belgium:'BRU',austria:'VIE',
-  israel:'TASE',japan:'TSE',hongkong:'HKEX',australia:'ASX',
-  canada:'TSX',brazil:'B3',singapore:'SGX'
-});
-// Verified company domains for holdings shown in the reported screenshots.
-// These are NOT new hardcoded image files; the existing local SVG/PNG mappings
-// remain byte-for-byte unchanged and always have priority.
-const stockLogoDomainHints=Object.freeze({
-  'POLYMED.NS':'polymedicure.com',
-  'AZN.ST':'astrazeneca.com','AZN.L':'astrazeneca.com',
-  'AZN':'astrazeneca.com','SAP.DE':'sap.com','SAP':'sap.com',
-  'NOW':'servicenow.com','GOOGL':'google.com','GOOG':'google.com'
-});
+const stockLogoCdn = 'https://cdn.jsdelivr.net/gh/MrChartist/global-stock-logos@main/logos/';
 // Exact user-supplied local logos for holdings where the external services
 // either miss entirely or return the wrong brand variant. Put these files in
 // /static/logos/ alongside the rest of the frontend static assets.
@@ -374,21 +356,16 @@ function regionalStockMatch(holding){
   return matchingSymbol||name||null;
 }
 function regionalStockLogo(entry){
-  return globalStockLogo(entry.market,entry.symbol);
+  const symbol=entry.symbol;
+  return `${stockLogoCdn}${catalogMarket(entry.market)}/${encodeURIComponent(symbol.replace(/[-.]/g,'_'))}.svg`;
 }
 function domainLogoSources(domain){
-  // High-quality square brand marks first, then full vector logos. Favicons
-  // are the LAST fallback, never preferred to a valid SVG or name lookup.
-  const clean=String(domain||'').trim().toLowerCase();
-  if(!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(clean))return [];
-  return [
-    `https://logoapi.sh/icon/${clean}.svg?fallback=404`,
-    `https://logoapi.sh/${clean}.svg?fallback=404`,
-    `https://icon.horse/icon/${clean}/svg?fallback=404`,
-    `https://icon.horse/icon/${clean}/256?fallback=404`,
-    `https://www.google.com/s2/favicons?domain=${encodeURIComponent(clean)}&sz=256`,
-    `https://icons.duckduckgo.com/ip3/${clean}.ico`
-  ];
+  // On a catalog miss, try a few issuer-logo providers before falling back
+  // to a generic favicon. This improves fund and ETF logo coverage without
+  // hardcoding per-ticker images into the UI.
+  return [`https://logoapi.sh/icon/${domain}.svg?fallback=404`,
+    `https://logo.clearbit.com/${domain}`,
+    `https://icons.duckduckgo.com/ip3/${domain}.ico`];
 }
 function cryptoLogoSymbol(holding){
   for(const input of [holding.ticker,holding.asset]){
@@ -436,16 +413,12 @@ const stockDomainByName = new Map([
   ['Hermès','hermes.com'],['Hermes','hermes.com'],['Copart','copart.com'],
   ['Inventurus Knowledge Solutions','ikshealth.com'],['IKS','ikshealth.com']
 ].map(([name,domain])=>[normalizeCompanyName(name),domain]));
-function globalStockLogo(market,symbol,explicitExchange=''){
-  // Exchange-qualified lookup prevents a ticker on one market from showing
-  // the icon of an unrelated US company. Unknown exchanges are not guessed.
+function globalStockLogo(market,symbol){
   if(!market||!symbol)return '';
-  const exchange=explicitExchange||stockLogoExchangeByMarket[market]||'';
-  if(market!=='us'&&!exchange)return '';
-  const qualified=market==='us'&&!explicitExchange
-    ?String(symbol).toUpperCase()
-    :`${exchange}:${String(symbol).toUpperCase()}`;
-  return `https://logoapi.sh/ticker/${encodeURIComponent(qualified)}.svg?fallback=none`;
+  // The catalogue uses TradingView's underscore class-share convention,
+  // rather than Yahoo's dash notation (VIT-B.ST -> sweden/VIT_B.svg).
+  const safeSymbol=symbol.toUpperCase().replace(/[-.]/g,'_');
+  return `${stockLogoCdn}${catalogMarket(market)}/${encodeURIComponent(safeSymbol)}.svg`;
 }
 function localLogoForHolding(holding){
   const ticker=String(holding.ticker||'').trim().toUpperCase();
@@ -470,7 +443,6 @@ function logoSources(holding){
   const type=holding.type;
   const exactLocalLogo=localLogoForHolding(holding);
   if(type==='Crypto'){
-    // Crypto behavior is intentionally unchanged.
     const coin=cryptoLogoSymbol(holding);
     return coin?[
       `https://logoapi.sh/crypto/${encodeURIComponent(coin)}.svg`,
@@ -481,29 +453,30 @@ function logoSources(holding){
   const regional=regionalStockMatch(holding);
   const urls=[];
   if(type==='Stock'||type==='ETF'||type==='Fund'){
-    // Hardcoded user logos ALWAYS remain the first source, without alteration.
     if(exactLocalLogo)urls.push(exactLocalLogo);
     if(type==='ETF'||type==='Fund'){
+      // A fund's issuer is a better identifier than an ambiguous short ticker.
       for(const domain of fundIssuerDomains(asset,holding.ticker))
         urls.push(...domainLogoSources(domain));
     }
-    const tickerKey=String(holding.ticker||'').trim().toUpperCase();
-    const knownDomain=stockDomainByYahooTicker[tickerKey]||stockLogoDomainHints[tickerKey]
-      ||regional?.domain||stockDomainByName.get(normalizeCompanyName(asset));
-    // Verified websites usually provide a better European/Indian brand logo
-    // than a ticker catalogue, so their vector icons come first.
-    if(knownDomain)urls.push(...domainLogoSources(knownDomain));
     if(parsed?.market){
-      urls.push(globalStockLogo(parsed.market,parsed.symbol,parsed.exchange||''));
+      urls.push(globalStockLogo(parsed.market,parsed.symbol));
     }else if(parsed?.symbol){
+      // Unqualified symbols are normally US-listed. Never reach this branch
+      // for a recognized Yahoo exchange suffix.
       if(regional?.market)urls.push(globalStockLogo(regional.market,regional.symbol));
       else urls.push(globalStockLogo('us',parsed.symbol));
     }else if(regional){
       urls.push(globalStockLogo(regional.market,regional.symbol));
     }
-    // Only unqualified (normally US) symbols may use the unqualified API.
-    // The globalStockLogo('us', ...) source above already covers it.
-    // Exact-name search is attempted after these SVGs and before favicons.
+    const knownDomain=stockDomainByYahooTicker[String(holding.ticker||'').trim().toUpperCase()]
+      ||regional?.domain||stockDomainByName.get(normalizeCompanyName(asset));
+    if(knownDomain)urls.push(...domainLogoSources(knownDomain));
+    if(parsed?.symbol && !parsed.market){
+      // The unkeyed ticker endpoint covers US stocks including Copart.
+      urls.push(`https://logoapi.sh/ticker/${encodeURIComponent(parsed.symbol)}.svg?fallback=none`);
+    }
+    // The on-error name search is a last resort, not the first choice.
   }
   return [...new Set(urls.filter(Boolean))];
 }
@@ -513,14 +486,10 @@ function logo(holding){
   const [bg,fg]=palette[type]||['#25344e','#78bdf0'];
   const icon=type==='Crypto'?'₿':asset.trim().toUpperCase().slice(0,2);
   const urls=logoSources(holding);
-  // Never stop searching for an HD logo simply because a favicon loaded.
-  // Local images and the existing cryptocurrency files retain their priority.
-  const fallback=urls.filter(u=>/icon\.horse\/icon\/[^?]+\/256\?|\/s2\/favicons\?|\/ip3\//.test(u));
-  const primary=urls.filter(u=>!/icon\.horse\/icon\/[^?]+\/256\?|\/s2\/favicons\?|\/ip3\//.test(u));
   const shouldLookupName=(type==='Stock'||type==='Fund'||type==='ETF')&&asset.trim().length>=2;
   const fitHint=logoFitHint(holding);
   const image=(urls.length||shouldLookupName)
-    ?`<img class="asset-logo-image" ${primary.length?`src="${html(primary[0])}"`:''} alt="" aria-hidden="true" loading="lazy" decoding="async" data-logo-next="${html(JSON.stringify(primary.slice(1)))}" data-logo-fallback="${html(JSON.stringify(fallback))}" ${fitHint?`data-logo-fit-hint="${html(fitHint)}"`:''} ${shouldLookupName?`data-logo-search="${html(asset)}" data-logo-ticker="${html(holding.ticker||'')}"`:''}>`
+    ?`<img class="asset-logo-image" ${urls.length?`src="${html(urls[0])}"`:''} alt="" aria-hidden="true" loading="lazy" decoding="async" data-logo-next="${html(JSON.stringify(urls.slice(1)))}" ${fitHint?`data-logo-fit-hint="${html(fitHint)}"`:''} ${shouldLookupName?`data-logo-search="${html(asset)}" data-logo-ticker="${html(holding.ticker||'')}"`:''}>`
     :'';
   return `<span class="asset-icon" style="background:${bg};color:${fg}" aria-hidden="true">${html(icon)}${image}</span>`;
 }
@@ -561,35 +530,13 @@ async function findStockLogoByName(name,ticker){
   }
   return stockLogoSearchCache.get(key);
 }
-// Move through vector sources, then the verified name lookup, and only then
-// lower-resolution favicons. The original letter tile is always retained.
-function advanceLogo(img){
-  if(!img.isConnected)return;
-  img.parentElement?.classList.remove('has-logo');
-  for(const key of ['logoNext','logoFallback']){
-    // The name lookup must run before trying any favicon fallback.
-    if(key==='logoFallback'&&img.dataset.logoSearch){
-      tryNameLogo(img);
-      return;
-    }
-    let next=[];
-    try{next=JSON.parse(img.dataset[key]||'[]');}catch(_){}
-    if(next.length){
-      img.dataset[key]=JSON.stringify(next.slice(1));
-      img.src=next[0];
-      return;
-    }
-  }
-  img.remove();
-}
 async function tryNameLogo(img){
   const name=img.dataset.logoSearch;
   delete img.dataset.logoSearch; // One lookup maximum per rendered icon.
-  if(!name){advanceLogo(img);return;}
+  if(!name)return img.remove();
   const url=await findStockLogoByName(name,img.dataset.logoTicker);
-  if(!img.isConnected)return;
-  if(url){img.src=url;return;}
-  advanceLogo(img); // If search misses, THEN try the low-res favicons.
+  if(img.isConnected&&url){img.src=url;return;}
+  img.remove(); // The original icon text stays exactly as before.
 }
 function activatePendingLogoSearch(target){
   target.querySelectorAll('.asset-logo-image:not([src])').forEach(img=>tryNameLogo(img));
@@ -610,7 +557,10 @@ function bindAssetLogoImages(){
   document.addEventListener('error',event=>{
     const img=event.target;
     if(!img.classList?.contains('asset-logo-image'))return;
-    advanceLogo(img);
+    let next=[];
+    try{next=JSON.parse(img.dataset.logoNext||'[]');}catch(_){}
+    if(next.length){img.parentElement?.classList.remove('has-logo');img.dataset.logoNext=JSON.stringify(next.slice(1));img.src=next[0];}
+    else tryNameLogo(img);
   },true);
 }
 function renderDashboard(){
