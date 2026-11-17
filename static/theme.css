@@ -485,3 +485,47 @@ html[data-theme="light"] textarea {
   width: 20px;
   height: 20px;
 }
+
+/* Slightly enlarge secondary / caption text (6%); leave primary figures and headings intact. */
+.eyebrow { font-size:11.13px; }
+.currency-pill { font-size:12.19px; }
+.change-line,.pnl-pill,.chart-wait { font-size:13.25px; }
+.range-row button { font-size:12.19px; }
+.summary-strip span { font-size:12.19px; }
+.section-count,.hint-tag,.count-tag { font-size:11.66px; }
+.text-link { font-size:12.72px; }
+.holding-subtitle,.holding-value span { font-size:12.19px; }
+.holding-details { font-size:12.72px; }
+.holding-details span { font-size:11.66px; }
+.nav-btn { font-size:10.6px; }
+.page-heading p:last-child { font-size:13.25px; }
+.capital-meta,.capital-reset { font-size:12.19px; }
+label,.auth-panel label { font-size:12.72px; }
+.toggle-label b,.setting-row strong,.file-row strong { font-size:13.78px; }
+.toggle-label small,.setting-row small,.file-row small { font-size:12.19px; }
+.trade-preview span,.list-hint { font-size:12.19px; }
+.primary-btn,.outline-btn,.search-field input { font-size:13.78px; }
+.trade-info span,.trade-amount small,.trade-info .side-label { font-size:11.66px; }
+.tax-total span { font-size:11.66px; }
+.tax-total small,.tax-entry small,.footnote { font-size:12.19px; }
+.profile-box div>span,.setting-row select { font-size:12.72px; }
+.secure-pill { font-size:11.66px; }
+.toast,.segmented button,.or-separator,.google-btn,.theme-switch button,.danger-btn { font-size:13.25px; }
+.app-loading>span,.privacy-note,.tiny { font-size:12.19px; }
+
+/* Tap/click an asset to reveal its trade-currency prices below the share count. */
+.home-holding-row { cursor:pointer; }
+.home-holding-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.home-holding-prices { white-space:normal; overflow:visible; overflow-wrap:anywhere; }
+.home-holding-prices[hidden] { display:none; }
+
+@media (max-width:700px) {
+  .holding-subtitle,.holding-value span { font-size:11.66px; }
+  .holding-details span { font-size:11.13px; }
+  .nav-btn { font-size:10.6px; }
+  .capital-meta,.capital-reset { font-size:11.66px; }
+}
+@media (max-width:430px) {
+  .currency-pill,.summary-strip span,.hint-tag { font-size:10.6px; }
+  .capital-meta { font-size:11.395px; }
+}

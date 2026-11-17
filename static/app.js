@@ -4,6 +4,8 @@ const $ = (id) => document.getElementById(id);
 const state = { user:null, dashboard:null, trades:[], history:{}, historyRange:'1M', view:'home',
   tradeSide:'BUY', authMode:'login', hidden:localStorage.getItem('track-private')==='true',
   chart:null, capitalChart:null, capitalFocus:null, theme:localStorage.getItem('track-theme')==='light'?'light':'dark', tradeLimit:55, editId:null, lastTax:null, busy:false };
+// Preserve the home list's expanded rows when the dashboard is re-rendered.
+const expandedHomeHoldings = new Set();
 const icons = { Stock:'S', Fund:'F', ETF:'E', Crypto:'₿' };
 const palette = { Stock:['#25344e','#78bdf0'], Fund:['#3c3450','#c3a7ed'], ETF:['#213c4c','#81cddd'], Crypto:['#3b3447','#e2b6cf'] };
 // Reference-inspired treemap: dark jewel tones alongside lighter pastel and bright tiles.
@@ -572,10 +574,19 @@ function renderDashboard(){
   $('unrealized-value').classList.toggle('negative',t.pnl<0);
   $('holdings-count').textContent=state.hidden?'••':t.assets;
   $('holdings-badge').textContent=d.holdings.length;
-  $('main-holdings').innerHTML=d.holdings.length?d.holdings.map(h=>
-    `<div class="holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${state.hidden?'••••':quantityFmt(h.quantity)} ${h.type==='Crypto'?'units':'shares'}</div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(h.invested?100*(h.pnl||0)/h.invested:0))}</span></div></div>`
-  ).join(''):emptyMessage('Nothing in your portfolio yet','Add a trade or upload your existing trades CSV.','trade');
+  $('main-holdings').innerHTML=d.holdings.length?d.holdings.map(h=>{
+    const key=JSON.stringify([h.asset,h.currency,h.type]);
+    const expanded=expandedHomeHoldings.has(key);
+    return `<div class="holding-row home-holding-row" role="button" tabindex="0" aria-expanded="${expanded}" data-holding-key="${html(key)}">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${state.hidden?'••••':quantityFmt(h.quantity)} ${h.type==='Crypto'?'units':'shares'}</div><div class="holding-subtitle home-holding-prices" ${expanded?'':'hidden'}><div>Last Price: ${html(fmt(h.ltp,h.currency,2))}</div><div>Avg Price: ${html(fmt(h.avg,h.currency,2))}</div></div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(h.invested?100*(h.pnl||0)/h.invested:0))}</span></div></div>`;
+  }).join(''):emptyMessage('Nothing in your portfolio yet','Add a trade or upload your existing trades CSV.','trade');
   activatePendingLogoSearch($('main-holdings'));
+}
+function toggleHomeHolding(row){
+  const expanded=row.getAttribute('aria-expanded')!=='true';
+  row.setAttribute('aria-expanded',String(expanded));
+  row.querySelector('.home-holding-prices').hidden=!expanded;
+  if(expanded)expandedHomeHoldings.add(row.dataset.holdingKey);
+  else expandedHomeHoldings.delete(row.dataset.holdingKey);
 }
 function emptyMessage(title,desc,action){return `<div class="empty"><strong>${html(title)}</strong>${html(desc)}${action?`<button type="button" data-go="${action}">Get started →</button>`:''}</div>`;}
 function renderAnalytics(){
@@ -901,6 +912,15 @@ function bindEvents(){
   document.querySelectorAll('[data-tab]').forEach(el=>el.addEventListener('click',()=>nav(el.dataset.tab)));
   document.addEventListener('click',e=>{const target=e.target.closest('[data-go]');if(target)nav(target.dataset.go);});
   document.querySelectorAll('[data-range]').forEach(el=>el.addEventListener('click',()=>loadRange(el.dataset.range)));
+  $('main-holdings').addEventListener('click',e=>{
+    const row=e.target.closest('.home-holding-row');
+    if(row)toggleHomeHolding(row);
+  });
+  $('main-holdings').addEventListener('keydown',e=>{
+    if(e.key!=='Enter'&&e.key!==' ')return;
+    const row=e.target.closest('.home-holding-row');
+    if(row){e.preventDefault();toggleHomeHolding(row);}
+  });
   $('refresh-btn').addEventListener('click',refreshPortfolio);
   $('capital-reset').addEventListener('click',()=>{state.capitalFocus=null;renderCapitalChart(true);});
   $('capital-chart').addEventListener('click',e=>{
@@ -941,7 +961,7 @@ function bindEvents(){
   $('base-select').addEventListener('change',changeBase);
   $('file-export').addEventListener('click',()=>{window.location.href='/api/export/trades';});
   $('file-import').addEventListener('change',importFile);
-  $('logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});state.user=null;state.dashboard=null;state.trades=[];state.history={};showAuth();toast('Signed out');}catch(e){toast(e.message,true);}});
+  $('logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});state.user=null;state.dashboard=null;state.trades=[];state.history={};expandedHomeHoldings.clear();showAuth();toast('Signed out');}catch(e){toast(e.message,true);}});
   window.addEventListener('resize',()=>{state.chart?.resize();fitCapitalTileLabels($('capital-chart'));});
 }
 async function startLoggedIn(){
