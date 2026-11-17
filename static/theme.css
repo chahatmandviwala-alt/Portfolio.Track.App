@@ -517,7 +517,7 @@ label,.auth-panel label { font-size:12.72px; }
 .home-holding-row { cursor:pointer; }
 .home-holding-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .home-holding-prices { white-space:normal; overflow:visible; overflow-wrap:anywhere; }
-.home-holding-prices > div + div { margin-top: 1px; }
+.home-holding-prices > div + div { margin-top: 2px; }
 .home-holding-prices[hidden] { display:none; }
 
 @media (max-width:700px) {
