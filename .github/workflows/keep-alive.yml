@@ -15,4 +15,4 @@ jobs:
           curl --fail --silent --show-error \
             --max-time 60 \
             --retry 2 \
-            https://portfolio-track-app.onrender.com/
+            https://portfolio-track-app.onrender.com/health
