@@ -84,8 +84,9 @@ class Login(BaseModel):
 @app.get('/',response_class=HTMLResponse)
 def page():return FileResponse(BASE/'static'/'index.html')
 
-@app.get('/health')
-def health():return {'ok':True}
+@app.api_route('/health', methods=['GET', 'HEAD'])
+def health():
+    return JSONResponse(content={'ok': True}, status_code=200)
 
 @app.get('/api/me')
 def me(request:Request,db:DBSession=Depends(db_dep)):
