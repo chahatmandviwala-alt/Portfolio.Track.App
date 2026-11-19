@@ -246,6 +246,7 @@ const localLogoByTicker = Object.freeze({
   'NH.NS':'/static/logos/Narayana.png',
   'POLYMED.NS':'/static/logos/polymed.png',
   'RAY-B.ST':'/static/logos/raysearch.png',
+  'MELI':'/static/logos/meli.png',
   
 });
 const localLogoByName = new Map([
