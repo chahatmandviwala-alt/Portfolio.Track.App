@@ -60,9 +60,16 @@ def init_db():
 def get_portfolio(session, user_key: str) -> Portfolio:
     p = session.get(Portfolio, user_key)
     if p is None:
-        p = Portfolio(user_key=user_key, csv_text='', base_currency='SEK', version=0)
-        session.add(p)
-        session.flush()
+        # Two first reads (dashboard and history) can arrive together. Persist the
+        # same empty ledger once and release the write transaction immediately.
+        if engine.dialect.name == 'postgresql':
+            from sqlalchemy.dialects.postgresql import insert
+        else:
+            from sqlalchemy.dialects.sqlite import insert
+        session.execute(insert(Portfolio).values(user_key=user_key, csv_text='', base_currency='SEK', version=0)
+                        .on_conflict_do_nothing(index_elements=[Portfolio.user_key]))
+        session.commit()
+        p = session.get(Portfolio, user_key)
     return p
 
 

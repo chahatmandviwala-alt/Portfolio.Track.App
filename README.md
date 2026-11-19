@@ -1,72 +1,48 @@
-# Track — private, mobile-first portfolio website
+# Track portfolio workspace
 
-A working FastAPI + HTML/CSS/JavaScript replacement frontend for your uploaded Streamlit portfolio tracker. Six tabs: Home, Analytics, New Trade, Trade History, Tax, Account. No Streamlit runtime or Node.js build step required.
+Track is a FastAPI application with a responsive HTML, CSS and JavaScript frontend. It runs with Python and serves its interface, fonts and charts from the same app.
 
-**Your private uploaded 1,554-trade CSV is intentionally NOT bundled with this project.** Log in, open **Account → Upload / replace portfolio**, and upload your original CSV. The import/export format is compatible with your Streamlit app: semicolon-delimited, with the same 13 columns.
+## Run locally
 
-## Features and behavior
+From the directory containing `app.py`, create a virtual environment and install the dependencies.
 
-- **Home:** current base-currency market value, invested cost, unrealized P/L, a graph with **1M / 3M / 6M / 1Y / 3Y / MAX**, refresh button, and a scrollable list of open positions with ticker badges. The chart shows *portfolio account market value*, **not a contribution-adjusted investment return**. Deposits and sales change this line.
-- **Analytics:** ECharts treemap by asset class → ticker, click to drill down; detailed holdings include quantity, last price, FIFO average, trade-currency unrealized P/L and current base-currency allocation percentage.
-- **New Trade:** buy/sell, date, asset, Yahoo Finance ticker, type, quantity, unit price, trade currency, fees, STT, automatic date-specific FX or manual FX, and save.
-- **Trade History:** searchable, incremental list, with edit and delete of individual transactions (including fee/FX fields).
-- **Tax:** date presets/custom range, FIFO realized P/L in base or trade currency, and CSV export. As in the original Streamlit script, base-currency INR realized P/L **excludes STT** from both acquisition and disposal costs; reporting in trade currency excludes STT too. Totals are not summed across mixed trade currencies.
-- **Account:** base currency, Google OAuth sign-in when configured, local username/password, hide balances, CSV import/export, sign out.
-- **Privacy:** sessions use secure, HttpOnly signed cookies in production; trades are stored per authenticated user, not in the static frontend. HTTPS is automatic on Render. Never commit or distribute your real trades CSV.
-
-## How it works
-
-```
-User's browser (HTML/CSS/JavaScript + ECharts)
-   └─ same-origin HTTP API
-        └─ FastAPI (app.py)
-             ├─ portfolio.py  (CSV, FIFO, trade calculations)
-             ├─ market.py     (NSE/Yahoo latest quotes, historical Yahoo prices + Frankfurter FX)
-             └─ storage.py    (SQLite local / PostgreSQL hosted)
-```
-
-History is calculated with Pandas/NumPy cumulative position changes and array arithmetic across a daily calendar. Historical quote and FX responses are cached in the database for 18 hours; for every range change, only the selected period is requested and chart rendering is client-side. Changing between already-loaded date ranges is immediate. **The first load on a free, sleeping host and the first fetch of uncached external market data can still be slow.** Yahoo Finance is a best-effort public source and may rate-limit or fail; this is not suitable for guaranteed real-time prices.
-
-For historical dates without market quotes, the backend uses the last observed transaction price as an **estimate**, and returns a warning and a list of estimated assets. If live or historical FX is unavailable, the app may fall back to a recorded transaction FX rate as an **explicitly labeled estimate**, never an arbitrary 1.0 for cross-currency conversion. Assets with no usable recorded FX are excluded and flagged. The portfolio chart is daily-close valuation and does **not** include unrecorded cash, dividends, stock-split/share-adjustment modeling, or external benchmark performance; these require additional transactions and corporate-action data. It should not be treated as a broker statement or certified tax calculation.
-
-### Source-specific accounting details
-
-The imported CSV holds the source's `fx_to_base` values as used by the original Streamlit app (whose default was SEK). When changing base currency in Account, historical transaction-date FX is retrieved, persisted into the CSV's `fx_to_base` column, and used for FIFO base-currency calculations. GBX (British pence) is normalized to GBP/100 for FX conversion. Market value is calculated with the latest stored trade-currency price multiplied by a *current* FX rate. Price refresh looks up on-demand latest traded quotes: `.NS` securities try the NSE India equity quote endpoint first, then Yahoo Finance 5-minute intraday quotes; other tickers use Yahoo intraday quotes. Failed lookups keep the previously stored LTP unchanged and are reported by ticker. Neither public endpoint has guaranteed uptime or a licensed real-time SLA. Historical charts still use daily closing prices, and estimates on dates without history are labeled separately from latest-price refresh results.
-
-Your source CSV has one historical FIFO inconsistency: `ALV` includes an unmatched sale of about 0.056974 units. The original Streamlit engine skips unmatched quantities during realized P/L; this version preserves that matching behavior and emits an explicit warning. Review/correct that trade if needed.
-
-## 1. Run locally (Windows, macOS or Linux)
-
-1. Install Python 3.11 or newer and download/unzip this project.
-2. In a terminal, change to the unzipped folder containing `app.py`.
-3. Create a virtual environment and install dependencies:
-
-```bash
+```sh
 python -m venv .venv
-# macOS/Linux:
+# macOS or Linux
 source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m uvicorn app:app --reload
 ```
 
-4. Copy `.env.example` to `.env` and edit it. Set a random `SESSION_SECRET`:
+Open [Track locally](http://127.0.0.1:8000). Create an account, then use **New trade** or **Account → Import portfolio**. Import accepts the original semicolon-delimited CSV. Local development uses `portfolio_local.db` in the project directory. Existing databases and exported portfolios remain compatible.
 
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
-```
+Production requires a persistent database and a strong `SESSION_SECRET`. To generate a secret, run `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Google sign-in is optional. The deployment instructions below list its settings.
 
-Paste the generated string into `SESSION_SECRET`. For local development leave `APP_ENV=development`, `DATABASE_URL=` (empty), and Google OAuth keys blank. The database will be `portfolio_local.db` in the project folder.
+## Workspace
 
-5. Start the server:
+- **Overview** shows the current value, FIFO invested capital, unrealized P/L, allocation by asset class and open holdings. Select a holding for last price, average price and quantity.
+- **Value history** supports 1M, 3M, 6M, 1Y, 3Y and MAX. Hover, tap or focus the chart and use the arrow keys to inspect a point. It measures portfolio market value, including the effects of purchases and sales. Valuation notes identify estimates and exclusions.
+- **Analytics** provides an interactive asset treemap and detailed positions. Allocation uses base-currency market values. Individual position details show the trade currency.
+- **New trade** supports purchases and sales, brokerage fees, STT and either automatic or manual trade-date FX. The preview shows the trade value before fees and tax.
+- **Trade history** supports searching, paging, editing and deleting transactions.
+- **Tax report** shows realized FIFO results for preset or custom dates and exports CSV. Trade-currency results are reported separately.
+- **Account** includes base currency, light and dark themes, balance masking, CSV import and export, and sign-out. Import replaces the active account's trades.
 
-```bash
-uvicorn app:app --reload --env-file .env
-```
+## Refresh and history
 
-6. Visit **http://127.0.0.1:8000**. Create a local account with a password of at least 8 characters. Open **Account → Upload / replace portfolio** and choose the original trades CSV. The app does not contain your uploaded trades by default. For a synthetic trial, import the included `sample_trades.csv` instead; its numbers are fictitious.
-7. In **Home**, tap the small refresh icon to request latest traded prices. Historical chart requests for 1M, 3M, etc. will use network APIs on first request.
+Price refresh reuses the active symbols from the dashboard. On a direct refresh, the existing FIFO matcher identifies open positions. Successful quotes are applied together, while unavailable quotes keep their stored prices. An unchanged quote batch skips the portfolio write. The interface receives the refreshed dashboard in the same response. A concurrent portfolio edit takes precedence over an in-flight refresh.
 
-**Note:** Google OAuth is optional. Local sign-in works immediately without any external identity provider.
+History accumulates quantity on trade dates, carries it onto the requested daily calendar, and aligns quote and FX series by column. Overlapping requests can share provider connections and identical in-flight downloads. Concurrent requests for the same account, chart inputs and range share one calculation. A five-minute chart cache is keyed by valuation inputs, base currency, day and the relevant official NSE close. A latest-price-only update can reuse the daily history. The first request for uncached market data still depends on provider latency.
+
+### Accounting and prices
+
+The accounting implementation is in `portfolio.py`. Daily valuation carries forward available market closes and uses transaction prices when closes are unavailable. Historical FX uses the existing forward/backfill and recorded-transaction fallback rules. The history response includes estimated and excluded assets. Daily values keep the original cent rounding, output dates and sampling.
+
+FIFO matches buys before sells at the same timestamp and retains the CSV ordering rule within each side. Economic base cost includes brokerage and STT. Base-currency INR realized P/L excludes STT from cost and proceeds. Trade-currency realized P/L also excludes STT. Unmatched sales are flagged and the unmatched quantity is excluded from FIFO realized P/L.
+
+Current valuation uses stored trade-currency prices and spot conversion. Changing the base currency recomputes transaction-date FX. GBX conversion retains the original pence scaling. After the Indian trading session, covered .NS tickers use the official NSE closing file when available. Fallbacks follow the existing `PRICE_SOURCE_PRIORITY` setting. Other tickers use Yahoo intraday quotes. The chart uses daily closes, Frankfurter FX and the latest applicable cached official NSE close.
 
 ## 2. Recommended free cloud deployment: Render + Supabase
 
@@ -91,7 +67,7 @@ postgresql://postgres.PROJECTREF:YOUR_PASSWORD@aws-0-REGION.pooler.supabase.com:
 ### B. Upload the website source to a *private* GitHub repository
 
 1. Create a new **private repository** at **https://github.com/new**.
-2. Push the files in this unzipped project, **excluding `.env`, your actual trades CSV and local `.db` files**. These are covered by `.gitignore`.
+2. Push the files in this unzipped project, **excluding `.env`, your actual trades CSV and local `.db` files**. Keep these files outside source control.
 
 ```bash
 git init
@@ -133,7 +109,7 @@ uvicorn app:app --host 0.0.0.0 --port $PORT --proxy-headers
 
 6. Click **Deploy**. Render provides HTTPS automatically at `https://YOUR-SERVICE.onrender.com`. Open the site and create a local account.
 7. Upload the trades CSV **through Account in the deployed site** (never via GitHub). The uploaded contents persist in Supabase's database, not Render's filesystem.
-8. Make a backup periodically using **Account → Download portfolio**.
+8. Make a backup periodically using **Account → Export portfolio**.
 
 You can alternatively deploy from the included `render.yaml` blueprint, but the manual steps above make it easier to configure secrets and distinguish the free web instance from the database.
 
@@ -164,12 +140,13 @@ https://YOUR-SERVICE.onrender.com/auth/google/callback
 
 ## 4. Checks and tests
 
-```bash
-pip install pytest
-pytest -q
+After installing the requirements, run the regression suite from the project root.
+
+```sh
+python -m unittest discover -s tests -v
 ```
 
-The project includes tests of FIFO calculations and CSV compatibility. For serious tax use, compare results with the original Streamlit app, especially historical FX, fees and stock splits.
+The tests use controlled market responses to cover short-window balances, missing prices and FX, empty and one-day histories, quote eligibility, cache invalidation, parallel refresh and concurrent chart requests.
 
 ## Other technical notes
 
@@ -188,7 +165,7 @@ The project includes tests of FIFO calculations and CSV compatibility. For serio
 | `redirect_uri_mismatch` | Compare exact `https://.../auth/google/callback` in Google Console and `PUBLIC_BASE_URL`. |
 | Render resets your account | `DATABASE_URL` points to **Supabase**, not ephemeral local SQLite. |
 | Postgres connection error | Use Supabase's **Session pooler** URI, correct credentials, and `sslmode=require`. |
-| Historical chart slow | First request fetches uncached price/FX series; later requests reuse database cache. |
+| Historical chart slow | The first request may wait for uncached prices and FX. Later requests reuse market data and computed ranges. |
 | Empty/estimated chart | Yahoo may lack specific ticker histories or refuse requests; check ticker codes and upstream service availability. |
 | Base currency change fails | The source currency might not have an available historical FX time series. Retain your original base or provide a supported currency. |
 | Trade import fails | Upload the source semicolon-delimited 13-column CSV. The original CSV can be imported without internal `trade_id`. |
@@ -200,7 +177,3 @@ The project includes tests of FIFO calculations and CSV compatibility. For serio
 - Supabase Free plan: https://supabase.com/pricing
 - Supabase Session Pooler: https://supabase.com/docs/guides/database/connecting-to-postgres
 - Google OAuth: https://developers.google.com/identity/protocols/oauth2/web-server
-
-### Appearance and allocation
-
-The Account tab includes a Dark / Light appearance switch stored in the browser (per device). Public Sans is loaded from Google Fonts with system sans-serif fallbacks. Analytics shows a country/region donut based on **trade currency**, not the issuer's domicile or listing exchange: INR → India, USD → USA, SEK → Sweden, EUR → Europe, with mappings for other common currencies and `Other (XXX)` for unrecognized codes. Allocation weights are computed from the **base-currency market values**, while each individual holding's displayed market value in Analytics is in its **trade currency**.

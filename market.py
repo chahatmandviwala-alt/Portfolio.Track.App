@@ -21,7 +21,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, time as daytime
 
@@ -59,6 +59,25 @@ _nse_block_until = 0.0
 _nse_eod_block_until = 0.0
 _nse_eod_missing_dates: dict[str, float] = {}
 _http_local = threading.local()
+# A process-wide pool reuses provider connections across requests and caps upstream concurrency.
+_io_pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix='market-io')
+_pending_io: dict[tuple, Future] = {}
+_pending_charts: dict[tuple, Future] = {}
+
+
+def _submit_io(key, function, *args):
+    def forget(future):
+        with _cache_lock:
+            if _pending_io.get(key) is future:
+                del _pending_io[key]
+
+    with _cache_lock:
+        future = _pending_io.get(key)
+        if future is None:
+            future = _io_pool.submit(function, *args)
+            _pending_io[key] = future
+            future.add_done_callback(forget)
+        return future
 
 
 def _http() -> requests.Session:
@@ -439,11 +458,15 @@ def _load_latest_nse_eod() -> tuple[date | None, dict[str, float]]:
     return None, {}
 
 
-def _nse_official_quotes(tickers: list[str]) -> dict[str, dict]:
-    if not tickers or not _NSE_OFFICIAL_CLOSE or _nse_trading_window():
+def _nse_official_quotes(tickers: list[str], report: Future | None = None) -> dict[str, dict]:
+    if not tickers:
         return {}
+    if report is None:
+        if not _NSE_OFFICIAL_CLOSE or _nse_trading_window():
+            return {}
+        report = _submit_io(('nse-report', datetime.now(_IST).date()), _load_latest_nse_eod)
     try:
-        day, closes = _load_latest_nse_eod()
+        day, closes = report.result()
     except Exception:
         _LOG.exception('Unable to retrieve NSE closing prices; using fallback')
         return {}
@@ -571,34 +594,38 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
         raise ValueError(' and '.join(causes) + ' unavailable')
 
     if missing:
-        # One archived NSE close replaces dozens of independent Yahoo queries
-        # when the Indian market is closed. Outside coverage retain fallback.
-        official = _nse_official_quotes([t for t in missing if t.upper().endswith('.NS')])
-        quotes.update(official)
-        missing = [t for t in missing if t not in official]
-        if official and _QUOTE_TTL:
-            with _cache_lock:
-                for ticker, quote in official.items():
-                    _quote_rows[mode + ':' + ticker] = (now + _QUOTE_TTL, dict(quote))
         begin = time.perf_counter()
-    if missing:
-        with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(missing))) as pool:
-            futures = {pool.submit(fetch, ticker): ticker for ticker in missing}
-            for future in as_completed(futures):
-                ticker = futures[future]
-                try:
-                    quote = future.result()
-                    quotes[ticker] = quote
-                    if _QUOTE_TTL:
-                        with _cache_lock:
-                            _quote_rows[mode + ':' + ticker] = (time.monotonic() + _QUOTE_TTL, dict(quote))
-                            _quote_rows.move_to_end(mode + ':' + ticker)
-                            while len(_quote_rows) > 200:
-                                _quote_rows.popitem(last=False)
-                except Exception as exc:
-                    errors[ticker] = str(exc)
-        _LOG.info('market.quote_refresh seconds=%.2f fetched=%d errors=%d cache_hits=%d',
-                  time.perf_counter()-begin, len(missing), len(errors), len(names)-len(missing))
+        indian = [ticker for ticker in missing if ticker.upper().endswith('.NS')]
+        check_close = bool(indian) and _NSE_OFFICIAL_CLOSE and mode == 'eod'
+        # Non-NSE symbols never depend on the exchange's closing file.
+        report = (_submit_io(('nse-report', datetime.now(_IST).date()), _load_latest_nse_eod)
+                  if check_close else None)
+        waiting = set(indian) if check_close else set()
+        futures = {_submit_io(('quote', mode, t), fetch, t): t for t in missing if t not in waiting}
+        if report is not None:
+            official = _nse_official_quotes(indian, report)
+            quotes.update(official)
+            for ticker in indian:
+                if ticker not in official:
+                    futures[_submit_io(('quote', mode, ticker), fetch, ticker)] = ticker
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                quotes[ticker] = future.result()
+            except Exception as exc:
+                errors[ticker] = str(exc)
+        if _QUOTE_TTL:
+            with _cache_lock:
+                expires = time.monotonic() + _QUOTE_TTL
+                for ticker in missing:
+                    if ticker in quotes:
+                        key = mode + ':' + ticker
+                        _quote_rows[key] = (expires, dict(quotes[ticker]))
+                        _quote_rows.move_to_end(key)
+                while len(_quote_rows) > 200:
+                    _quote_rows.popitem(last=False)
+        _LOG.info('market.quote_refresh seconds=%.2f requested=%d errors=%d cache_hits=%d',
+                  time.perf_counter()-begin, len(names), len(errors), len(names)-len(missing))
     return quotes, errors
 
 
@@ -642,28 +669,27 @@ def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool
     if jobs:
         begin = time.perf_counter()
         future_map = {}
-        with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, max(1, len(jobs)))) as pool:
-            for symbol, (_, _, windows) in jobs.items():
-                for a, b in windows:
-                    fut = pool.submit(provider, symbol, a, b)
-                    future_map[fut] = (symbol, a, b)
-            completed: dict[str, list] = {x: [] for x in jobs}
-            failed: dict[str, bool] = {x: False for x in jobs}
-            for fut in as_completed(future_map):
-                symbol, a, b = future_map[fut]
-                try:
-                    chunk = fut.result()
-                    if not isinstance(chunk, dict):
-                        raise TypeError('provider did not return a dictionary')
-                    # A completely empty response spanning business days is
-                    # commonly a transient API failure, not a successful update.
-                    # Never mark the whole gap as covered in that situation.
-                    if not chunk and jobs[symbol][1] is not None and jobs[symbol][1].values and len(pd.bdate_range(a, b)) > 0:
-                        raise ValueError('No refreshed business-day data; retaining prior prices')
-                    completed[symbol].append(((a, b), chunk))
-                except Exception as exc:
-                    failed[symbol] = True
-                    errors[symbol] = f'Market data unavailable ({type(exc).__name__})'
+        for symbol, (key, _, windows) in jobs.items():
+            for a, b in windows:
+                fut = _submit_io(('series', key, a, b), provider, symbol, a, b)
+                future_map[fut] = (symbol, a, b)
+        completed: dict[str, list] = {x: [] for x in jobs}
+        failed: dict[str, bool] = {x: False for x in jobs}
+        for fut in as_completed(future_map):
+            symbol, a, b = future_map[fut]
+            try:
+                chunk = fut.result()
+                if not isinstance(chunk, dict):
+                    raise TypeError('provider did not return a dictionary')
+                # A completely empty response spanning business days is
+                # commonly a transient API failure, not a successful update.
+                # Never mark the whole gap as covered in that situation.
+                if not chunk and jobs[symbol][1] is not None and jobs[symbol][1].values and len(pd.bdate_range(a, b)) > 0:
+                    raise ValueError('No refreshed business-day data; retaining prior prices')
+                completed[symbol].append(((a, b), chunk))
+            except Exception as exc:
+                failed[symbol] = True
+                errors[symbol] = f'Market data unavailable ({type(exc).__name__})'
         to_save = {}
         stamp = datetime.now(timezone.utc)
         for symbol, (key, entry, windows) in jobs.items():
@@ -773,32 +799,71 @@ def trade_fx_rates(df: pd.DataFrame, base: str, preserve_legacy_sek: bool = Fals
     return output, warns
 
 
-def portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
-    """Memoize a calculated chart briefly; cache key covers all user trade data.
+_HISTORY_COLUMNS = ['trade_date', 'asset', 'side', 'quantity', 'ticker', 'trade_ccy',
+                    'price_trade_ccy', 'fx_to_base']
 
-    Chart calculations themselves are unchanged (in _calculate_portfolio_history).
-    The key is a content hash, NOT an unscoped per-user cache entry: a changed
-    transaction or last price automatically invalidates it.
-    """
+
+def history_revision(df: pd.DataFrame, base: str) -> str:
+    """Identify exactly the ledger and official-close inputs used by the daily chart."""
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(base.encode())
+    digest.update(date.today().isoformat().encode())
+    if not df.empty:
+        digest.update(pd.util.hash_pandas_object(df[_HISTORY_COLUMNS], index=False).values.tobytes())
+        if _NSE_OFFICIAL_CLOSE and df.ticker.str.upper().str.endswith('.NS').any():
+            days = [d for d in _nse_report_dates() if d <= date.today()]
+            keys = ['nse:close:' + d.strftime('%Y%m%d') for d in days]
+            try:
+                cached = _read_cached(keys)
+            except Exception:
+                # Close metadata only affects the chart key. A cache outage must not
+                # prevent the dashboard from displaying a stored portfolio valuation.
+                _LOG.exception('Could not read NSE close metadata for chart revision')
+                digest.update(b'close-metadata-unavailable')
+                cached = {}
+            for key in keys:
+                record = cached.get(key)
+                if record and record.values:
+                    digest.update((key + record.fetched.isoformat()).encode())
+                    break
+    return digest.hexdigest()
+
+
+def portfolio_history(df: pd.DataFrame, base: str, span: str, *, revision=None, owner=None) -> dict:
     if span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
         raise ValueError('Unsupported range')
-    try:
-        digest = hashlib.blake2b(pd.util.hash_pandas_object(df, index=True).values.tobytes(),
-                                 digest_size=16).hexdigest()
-    except (TypeError, ValueError):
-        return _calculate_portfolio_history(df, base, span)
-    key = (base, span, date.today().isoformat(), digest)
+    key = (owner, revision or history_revision(df, base), span)
     with _cache_lock:
         hit = _chart_rows.get(key)
         if hit and hit[0] > time.monotonic():
             _chart_rows.move_to_end(key)
             return copy.deepcopy(hit[1])
-    result = _calculate_portfolio_history(df, base, span)
-    with _cache_lock:
-        _chart_rows[key] = (time.monotonic() + 300, copy.deepcopy(result))
-        while len(_chart_rows) > 30:
-            _chart_rows.popitem(last=False)
-    return result
+        pending = _pending_charts.get(key)
+        leader = pending is None
+        if leader:
+            pending = _pending_charts[key] = Future()
+    if not leader:
+        return copy.deepcopy(pending.result())
+    try:
+        result = _calculate_portfolio_history(df, base, span)
+        with _cache_lock:
+            _chart_rows[key] = (time.monotonic() + 300, result)
+            while len(_chart_rows) > 30:
+                _chart_rows.popitem(last=False)
+        pending.set_result(result)
+        return copy.deepcopy(result)
+    except BaseException as exc:
+        pending.set_exception(exc)
+        raise
+    finally:
+        with _cache_lock:
+            _pending_charts.pop(key, None)
+
+
+def _daily_frame(frame: pd.DataFrame, days: pd.DatetimeIndex) -> pd.DataFrame:
+    """Align all columns at once; retain observations before the visible interval."""
+    frame.index = pd.to_datetime(frame.index)
+    return frame.reindex(frame.index.union(days)).sort_index().ffill().reindex(days)
 
 
 def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
@@ -816,20 +881,15 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     delta['signed_qty'] = delta.quantity * np.where(delta.side == 'BUY',1,-1)
     changes = delta.pivot_table(index='trade_date', columns='asset', values='signed_qty',
                                 aggfunc='sum', fill_value=0)
-    changes = changes.reindex(pd.date_range(first,end), fill_value=0).cumsum().clip(lower=0).reindex(idx).ffill().fillna(0)
+    # Cumulative balances change only on trade dates. Preserve pre-window balances
+    # and clip *after* summation, including portfolios with historical oversells.
+    changes = changes.sort_index().cumsum().clip(lower=0).reindex(idx, method='ffill').fillna(0)
     assets = list(changes.columns)
-    meta = {}
-    tickers = []
-    ccys = []
-    for asset,g in df.groupby('asset',sort=False):
-        if asset not in changes.columns: continue
-        g = g.sort_values('trade_date',kind='stable')
-        latest = g[g.ticker.astype(str).str.len()>0]
-        ticker = str(latest.iloc[-1].ticker) if not latest.empty else ''
-        ccy = str(g.iloc[-1].trade_ccy)
-        meta[asset] = {'ticker': ticker, 'ccy': ccy}
-        if ticker: tickers.append(ticker)
-        ccys.append(ccy)
+    chronological = df.sort_values('trade_date', kind='stable')
+    latest = chronological.drop_duplicates('asset', keep='last').set_index('asset')
+    named = chronological[chronological.ticker.ne('')].drop_duplicates('asset', keep='last')
+    tickers = named.set_index('asset').ticker.reindex(assets).fillna('').tolist()
+    ccys = latest.trade_ccy.reindex(assets).tolist()
     market_start = start - timedelta(days=10)
     begin = time.perf_counter()
     # One Supabase SELECT for both Yahoo-price and FX cache keys. Negative
@@ -851,44 +911,38 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     prices_elapsed = time.perf_counter() - begin
     fx_elapsed = 0.0  # concurrent, included in wall-clock time above
     prices = _overlay_official_nse_history(prices, end)
-    trade_price_by_asset = {}
-    for asset,g in df.groupby('asset'):
-        purchase = g[['trade_date','price_trade_ccy']].copy()
-        purchase['trade_date'] = purchase.trade_date.dt.normalize()
-        purchase = purchase.drop_duplicates('trade_date',keep='last').set_index('trade_date')['price_trade_ccy']
-        trade_price_by_asset[asset] = purchase
-    mat = np.zeros((len(idx),len(assets)),dtype='float64')
-    unknown_assets=[];estimated_assets=[];warnings=[]
-    for j,asset in enumerate(assets):
-        m=meta[asset]
-        raw=pd.Series(prices.get(m['ticker'],{}),dtype='float64') if m['ticker'] else pd.Series(dtype='float64')
-        if not raw.empty:raw.index=pd.to_datetime(raw.index)
-        market_prices=raw.reindex(idx).ffill()
-        if not raw.empty:
-            market_prices=raw.reindex(raw.index.union(idx)).sort_index().ffill().reindex(idx)
-        trade_px=trade_price_by_asset[asset]
-        trade_px=trade_px.reindex(trade_px.index.union(idx)).sort_index().ffill().reindex(idx)
-        uses_proxy=market_prices.isna() & trade_px.notna() & (changes[asset]>0)
-        if uses_proxy.any():estimated_assets.append(asset)
-        px=market_prices.fillna(trade_px)
-        if (px.isna() & (changes[asset]>0)).any():unknown_assets.append(asset)
-        fxdata=fxs.get(m['ccy'],{})
-        if m['ccy']==base:
-            fx=pd.Series(1.0,index=idx)
-        elif fxdata:
-            rate=pd.Series(fxdata,dtype='float64');rate.index=pd.to_datetime(rate.index)
-            fx=rate.reindex(rate.index.union(idx)).sort_index().ffill().reindex(idx)
-            fx=fx.bfill()
-        else:
-            tx=df[df.asset==asset][['trade_date','fx_to_base']].copy()
-            tx['trade_date']=tx.trade_date.dt.normalize()
-            tx=tx.drop_duplicates('trade_date',keep='last').set_index('trade_date')['fx_to_base']
-            fx=tx.reindex(tx.index.union(idx)).sort_index().ffill().reindex(idx)
-            if fx.isna().any():fx=fx.bfill()
-            if fx.notna().any():estimated_assets.append(asset)
-            else:unknown_assets.append(asset)
-        qty=changes[asset].to_numpy(dtype=float)
-        mat[:,j]=qty*np.nan_to_num(px.to_numpy(dtype=float),nan=0)*np.nan_to_num(fx.to_numpy(dtype=float),nan=0)
+    # Last row in CSV order on each trade day, as in the original price/FX fallback.
+    daily_trades = df.assign(day=delta.trade_date).drop_duplicates(['day', 'asset'], keep='last')
+    daily_trades = daily_trades.set_index(['day', 'asset'])
+    recorded_prices = _daily_frame(daily_trades.price_trade_ccy.unstack(), idx).reindex(columns=assets)
+    market_prices = _daily_frame(pd.DataFrame(prices, dtype='float64'), idx).reindex(columns=tickers)
+    market_prices.columns = assets
+    positive = changes.gt(0)
+    estimated = (market_prices.isna() & recorded_prices.notna() & positive).any()
+    prices_used = market_prices.fillna(recorded_prices)
+    unknown = (prices_used.isna() & positive).any()
+
+    # Align each market currency once, then gather its series for every asset using it.
+    rates = _daily_frame(pd.DataFrame(fxs, dtype='float64'), idx).bfill()
+    rates[base] = 1.0
+    asset_rates = rates.reindex(columns=ccys).copy()
+    asset_rates.columns = assets
+    missing_rates = [asset for asset, ccy in zip(assets, ccys) if ccy != base and not fxs.get(ccy)]
+    if missing_rates:
+        recorded = daily_trades.fx_to_base.unstack().reindex(columns=missing_rates)
+        recorded = _daily_frame(recorded, idx).bfill()
+        asset_rates[missing_rates] = recorded
+        available = recorded.notna().any()
+        estimated.loc[missing_rates] |= available
+        unknown.loc[missing_rates] |= ~available
+
+    estimated_assets = estimated.index[estimated].tolist()
+    unknown_assets = unknown.index[unknown].tolist()
+    warnings = []
+    # Original summation order and cent rounding are significant near half-cent boundaries.
+    mat = np.ascontiguousarray(changes.to_numpy(dtype=float) *
+                               np.nan_to_num(prices_used.to_numpy(dtype=float), nan=0) *
+                               np.nan_to_num(asset_rates.to_numpy(dtype=float), nan=0))
     if price_errors:warnings.append(f'Historical quote errors for {len(price_errors)} ticker(s).')
     if fx_errors:warnings.append(f'Historical FX errors for {len(fx_errors)} currency pair(s); recorded transaction FX used as an estimate where possible.')
     if estimated_assets:warnings.append('Some dates use the last trade price as an estimate where market-history quotes are missing.')

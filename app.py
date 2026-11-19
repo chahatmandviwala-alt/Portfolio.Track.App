@@ -1,6 +1,8 @@
 """Portfolio Track — FastAPI server for the mobile-first investment tracker."""
 from __future__ import annotations
 import csv
+from dataclasses import dataclass
+from functools import lru_cache
 from datetime import date,datetime,timedelta,timezone
 from io import StringIO
 import hashlib,base64,hmac,os,re,secrets
@@ -11,6 +13,7 @@ from fastapi.responses import HTMLResponse,JSONResponse,StreamingResponse,Redire
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel,Field
 from starlette.middleware.sessions import SessionMiddleware
+from sqlalchemy import update
 from sqlalchemy.orm import Session as DBSession
 import numpy as np
 import pandas as pd
@@ -64,8 +67,42 @@ def get_owned(user:str,db:DBSession)->Portfolio:
     return get_portfolio(db,user)
 
 
-def data_for(p:Portfolio)->pd.DataFrame:
-    return engine.read_trades(p.csv_text)
+@dataclass
+class Ledger:
+    trades: pd.DataFrame
+    tickers: tuple[str, ...] | None = None
+
+
+@lru_cache(maxsize=6)
+def _cached_ledger(user: str, csv_text: str) -> Ledger:
+    return Ledger(engine.read_trades(csv_text))
+
+
+def ledger_for(p: Portfolio) -> Ledger:
+    # Keep the common dashboard/refresh/chart sequence from reparsing a CSV three times.
+    # Large imports remain usable without retaining several large frames between requests.
+    if len(p.csv_text) > 1_000_000:
+        return Ledger(engine.read_trades(p.csv_text))
+    return _cached_ledger(p.user_key, p.csv_text)
+
+
+def data_for(p: Portfolio) -> pd.DataFrame:
+    # Trade editing and base-currency changes mutate their working frame.
+    return ledger_for(p).trades.copy()
+
+
+def quote_tickers(ledger: Ledger) -> tuple[str, ...]:
+    if ledger.tickers is None:
+        # FIFO matching determines remaining quantity even for unmatched historical sales.
+        # Unit price affects cost only. No derived columns or second cost-basis pass needed.
+        trades = ledger.trades
+        positions, _, _ = engine.fifo(trades, 'price_trade_ccy')
+        symbols = set()
+        for asset, rows in trades[trades.ticker.ne('')].groupby('asset', sort=False):
+            if positions[asset]['quantity'] > 1e-6:
+                symbols.add(str(rows.sort_values('trade_date').iloc[-1].ticker))
+        ledger.tickers = tuple(sorted(symbols))
+    return ledger.tickers
 
 
 def save_data(db:DBSession,p:Portfolio,d:pd.DataFrame):
@@ -165,9 +202,8 @@ async def google_callback(request:Request,db:DBSession=Depends(db_dep)):
     request.session.clear();request.session['user']=key
     return RedirectResponse('/',status_code=303)
 
-@app.get('/api/dashboard')
-def dashboard(request:Request,user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
-    p=get_owned(user,db);d=data_for(p)
+def dashboard_payload(p: Portfolio, ledger: Ledger) -> dict:
+    d = ledger.trades
     ccys=d.trade_ccy.unique().tolist() if not d.empty else []
     fx,fxwarns=market.spot_rates(ccys,p.base_currency) if ccys else ({},[])
     # Outage fallback: use an *explicitly labeled* recorded transaction FX rate,
@@ -183,13 +219,28 @@ def dashboard(request:Request,user:str=Depends(session_user),db:DBSession=Depend
     out['base_currency']=p.base_currency
     out['trades_count']=len(d)
     out['version']=p.version
+    out['history_revision'] = market.history_revision(d, p.base_currency)
+    ledger.tickers = tuple(sorted({h['ticker'] for h in out['holdings'] if h['ticker']}))
     return out
 
+@app.get('/api/dashboard')
+def dashboard(request: Request, user: str = Depends(session_user), db: DBSession = Depends(db_dep)):
+    p = get_owned(user, db)
+    db.commit()  # Release the connection before calling the market providers.
+    return dashboard_payload(p, ledger_for(p))
+
+
 @app.get('/api/history')
-def history(span:str=Query('1M'),user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
-    p=get_owned(user,db)
-    try:return market.portfolio_history(data_for(p),p.base_currency,span)
-    except ValueError as exc:raise HTTPException(400,str(exc))
+def history(span: str = Query('1M'), user: str = Depends(session_user), db: DBSession = Depends(db_dep)):
+    p = get_owned(user, db)
+    db.commit()
+    d = ledger_for(p).trades
+    try:
+        revision = market.history_revision(d, p.base_currency)
+        result = market.portfolio_history(d, p.base_currency, span, revision=revision, owner=user)
+        return {**result, 'history_revision': revision}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 @app.get('/api/trades')
 def trades(user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
@@ -337,23 +388,33 @@ def settings(item:SettingsInput,request:Request,user:str=Depends(session_user),d
     return {'ok':True,'base_currency':new_base}
 
 @app.post('/api/refresh')
-def refresh(request:Request,user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
+def refresh(request: Request, user: str = Depends(session_user), db: DBSession = Depends(db_dep),
+            include_dashboard: bool = False):
     _check_origin(request)
-    p=get_owned(user,db);d=data_for(p)
-    if d.empty:return {'updated':0,'errors':[]}
-    active=engine.summarize(d,p.base_currency,{})['holdings']
-    tickers=sorted(set(r['ticker'] for r in active if r['ticker']))
-    quotes,errors=market.get_latest_prices(tickers)
-    updated=0
+    p = get_owned(user, db)
+    db.commit()
+    ledger = ledger_for(p)
+    tickers = quote_tickers(ledger)
+    quotes, errors = market.get_latest_prices(list(tickers)) if tickers else ({}, {})
+    reply = {'updated': len(quotes), 'requested': len(tickers), 'errors': errors,
+             'quotes': {t: {'source': q['source'], 'as_of': q['as_of']} for t, q in quotes.items()}}
     if quotes:
-        # Imported CSV columns may be inferred as integer; latest quotes are fractional.
-        d['last_price_trade_ccy']=d['last_price_trade_ccy'].astype(float)
-    for ticker,quote in quotes.items():
-        mask=(d.ticker==ticker)
-        if mask.any():
-            d.loc[mask,'last_price_trade_ccy']=quote['price']
-            updated+=1
-    if updated:save_data(db,p,d)
-    return {'updated':updated,'requested':len(tickers),
-            'quotes':{ticker:{'source':q['source'],'as_of':q['as_of']} for ticker,q in quotes.items()},
-            'errors':errors}
+        trades = ledger.trades
+        fresh = trades.ticker.map({t: q['price'] for t, q in quotes.items()})
+        changed = fresh.notna() & fresh.ne(trades.last_price_trade_ccy)
+        if changed.any():
+            trades = trades.copy()
+            trades['last_price_trade_ccy'] = trades.last_price_trade_ccy.astype(float).where(~changed, fresh)
+            # A quote fetched while a trade was edited must never overwrite the newer ledger.
+            saved = db.execute(update(Portfolio).where(Portfolio.user_key == user, Portfolio.version == p.version)
+                               .values(csv_text=engine.to_csv(trades), version=Portfolio.version + 1,
+                                       updated_at=datetime.now(timezone.utc))
+                               .execution_options(synchronize_session=False))
+            db.commit()
+            if saved.rowcount != 1:
+                raise HTTPException(409, 'Portfolio changed during refresh. Refresh again for current prices.')
+    if include_dashboard:
+        db.refresh(p)
+        db.commit()
+        reply['dashboard'] = dashboard_payload(p, ledger_for(p))
+    return reply
