@@ -18,7 +18,7 @@
       const root = document.documentElement;
       const themeMeta = document.querySelector('meta[name="theme-color"]');
       const syncBrowserTheme = () => {
-        if (themeMeta) themeMeta.content = root.dataset.theme === 'light' ? '#f3f5f9' : '#090b0e';
+        if (themeMeta) themeMeta.content = root.dataset.theme === 'light' ? '#efeae1' : '#090b0e';
       };
       syncBrowserTheme();
       new MutationObserver(syncBrowserTheme).observe(root, {
