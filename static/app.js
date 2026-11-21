@@ -1,11 +1,18 @@
-/* Track — lightweight mobile-first client. All portfolio calculations run in Python. */
+/* Track — lightweight responsive client. All portfolio calculations run in Python. */
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { user:null, dashboard:null, trades:[], history:{}, historyRange:'1M', view:'home',
+const state = {
+  user:null, dashboard:null, trades:[], history:{}, historyRevision:null,
+  historyRange:'1M', view:'home', homeSort:'value', sideFilter:'ALL',
   tradeSide:'BUY', authMode:'login', hidden:localStorage.getItem('track-private')==='true',
-  chart:null, capitalChart:null, capitalFocus:null, theme:localStorage.getItem('track-theme')==='light'?'light':'dark', tradeLimit:55, editId:null, lastTax:null, busy:false };
+  chart:null, capitalChart:null, capitalFocus:null,
+  theme:localStorage.getItem('track-theme')==='light'?'light':'dark',
+  tradeLimit:55, editId:null, lastTax:null, busy:false
+};
 // Preserve the home list's expanded rows when the dashboard is re-rendered.
 const expandedHomeHoldings = new Set();
+// Deduplicate concurrent or hovered history fetches for the same (revision, span).
+const inFlightHistory = new Map();
 const icons = { Stock:'S', Fund:'F', ETF:'E', Crypto:'₿' };
 const palette = { Stock:['#25344e','#78bdf0'], Fund:['#3c3450','#c3a7ed'], ETF:['#213c4c','#81cddd'], Crypto:['#3b3447','#e2b6cf'] };
 // Reference-inspired treemap: dark jewel tones alongside lighter pastel and bright tiles.
@@ -48,17 +55,37 @@ async function api(url,options={}){
   }
   return res.status===204?{}:res.json();
 }
+const EYE_OPEN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_CLOSED_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18M9.8 6.3A11 11 0 0 1 12 6c6.4 0 10 6 10 6a17 17 0 0 1-3.6 4.1M6 8.1A18 18 0 0 0 2 12s3.6 6 10 6c1.4 0 2.6-.3 3.7-.8"/><path d="M9 10a3 3 0 0 0 5 4"/></svg>';
+const SUN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>';
+const MOON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>';
+
+function syncQuickThemeIcons(){
+  const icon = state.theme === 'dark' ? SUN_SVG : MOON_SVG;
+  const label = state.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+  for(const id of ['theme-quick-toggle', 'sidebar-theme-toggle']){
+    const btn = $(id);
+    if(btn){ btn.innerHTML = icon; btn.title = label; btn.setAttribute('aria-label', label); }
+  }
+}
 function applyTheme(theme){
   state.theme=theme==='light'?'light':'dark';localStorage.setItem('track-theme',state.theme);
   document.documentElement.dataset.theme=state.theme;
-  document.querySelector('meta[name="theme-color"]').content=state.theme==='dark'?'#0c0d0f':'#f0f3f9';
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if(themeMeta) themeMeta.content=state.theme==='dark'?'#090b0e':'#f3f5f9';
   document.querySelectorAll('[data-theme-choice]').forEach(b=>{
     const selected=b.dataset.themeChoice===state.theme;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));
   });
+  syncQuickThemeIcons();
   if(state.dashboard){renderDashboard();renderAnalytics();renderChart(state.history[state.historyRange]??null);}
 }
-function toggleHidden(value){state.hidden=!!value;localStorage.setItem('track-private',String(value));$('account-privacy').checked=value;
-  $('privacy-toggle').innerHTML=value?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3l18 18M9.8 6.3A11 11 0 0 1 12 6c6.4 0 10 6 10 6a17 17 0 0 1-3.6 4.1M6 8.1A18 18 0 0 0 2 12s3.6 6 10 6c1.4 0 2.6-.3 3.7-.8"/><path d="M9 10a3 3 0 0 0 5 4"/></svg>':'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
+function toggleHidden(value){
+  state.hidden=!!value;localStorage.setItem('track-private',String(value));
+  const accPriv = $('account-privacy'); if(accPriv) accPriv.checked=value;
+  const icon = value ? EYE_CLOSED_SVG : EYE_OPEN_SVG;
+  for(const id of ['privacy-toggle', 'sidebar-privacy-toggle']){
+    const btn = $(id); if(btn) btn.innerHTML = icon;
+  }
   if(state.dashboard){renderDashboard();renderAnalytics();renderChart(state.history[state.historyRange]??null);}
   if(state.lastTax)renderTax(state.lastTax);
   renderTrades();
@@ -80,6 +107,7 @@ function nav(tab){
   if(tab==='tax')loadTax();
   if(tab==='account')renderAccount();
 }
+
 // Logos are a presentation-only enhancement. Original letter/Bitcoin icons remain
 // underneath each image and are used whenever no real logo can be loaded.
 // The logo providers require no account, API key, or Python/backend changes.
@@ -601,6 +629,20 @@ function bindAssetLogoImages(){
     else tryNameLogo(img);
   },true);
 }
+
+function sortedHomeHoldings(holdings){
+  const list = [...holdings];
+  if(state.homeSort === 'pnl'){
+    list.sort((a,b)=>{
+      const pa = a.invested ? (a.pnl||0)/a.invested : -Infinity;
+      const pb = b.invested ? (b.pnl||0)/b.invested : -Infinity;
+      return pb - pa || (b.value||0) - (a.value||0);
+    });
+  } else if(state.homeSort === 'name'){
+    list.sort((a,b)=>String(a.asset||'').localeCompare(String(b.asset||'')));
+  }
+  return list;
+}
 function renderDashboard(){
   const d=state.dashboard;if(!d)return;
   const t=d.totals, base=d.base_currency;
@@ -612,16 +654,20 @@ function renderDashboard(){
   $('unrealized-value').classList.toggle('negative',t.pnl<0);
   $('holdings-count').textContent=state.hidden?'••':t.assets;
   $('holdings-badge').textContent=d.holdings.length;
-  $('main-holdings').innerHTML=d.holdings.length?d.holdings.map(h=>{
+  const holdings = sortedHomeHoldings(d.holdings);
+  $('main-holdings').innerHTML=holdings.length?holdings.map(h=>{
     const key=JSON.stringify([h.asset,h.currency,h.type]);
     const expanded=expandedHomeHoldings.has(key);
-    return `<div class="holding-row home-holding-row" role="button" tabindex="0" aria-expanded="${expanded}" data-holding-key="${html(key)}">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${state.hidden?'••••':quantityFmt(h.quantity)} ${h.type==='Crypto'?'units':'shares'}</div><div class="holding-subtitle home-holding-prices" ${expanded?'':'hidden'}><div>Last Price: ${html(fmt(h.ltp,h.currency,2))}</div><div>Avg Price: ${html(fmt(h.avg,h.currency,2))}</div></div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(h.invested?100*(h.pnl||0)/h.invested:0))}</span></div></div>`;
+    const pnlPct = h.invested ? 100*(h.pnl||0)/h.invested : 0;
+    const shareText = state.hidden ? '••••' : compact(h.share,1)+'%';
+    return `<div class="holding-row home-holding-row ${expanded?'is-expanded':''}" role="button" tabindex="0" aria-expanded="${expanded}" data-holding-key="${html(key)}">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${state.hidden?'••••':quantityFmt(h.quantity)} ${h.type==='Crypto'?'units':'shares'} <span class="holding-weight">· ${html(shareText)}</span></div><div class="holding-subtitle home-holding-prices" ${expanded?'':'hidden'}><div><span>Last Price:</span> <b>${html(fmt(h.ltp,h.currency,2))}</b></div><div><span>Avg Price:</span> <b>${html(fmt(h.avg,h.currency,2))}</b></div></div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(pnlPct))}</span></div><span class="row-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span></div>`;
   }).join(''):emptyMessage('Nothing in your portfolio yet','Add a trade or upload your existing trades CSV.','trade');
   activatePendingLogoSearch($('main-holdings'));
 }
 function toggleHomeHolding(row){
   const expanded=row.getAttribute('aria-expanded')!=='true';
   row.setAttribute('aria-expanded',String(expanded));
+  row.classList.toggle('is-expanded',expanded);
   row.querySelector('.home-holding-prices').hidden=!expanded;
   if(expanded)expandedHomeHoldings.add(row.dataset.holdingKey);
   else expandedHomeHoldings.delete(row.dataset.holdingKey);
@@ -631,11 +677,12 @@ function renderAnalytics(){
   const d=state.dashboard;if(!d)return;
   $('analytics-n').textContent=`${d.holdings.length} assets`;
   $('analytics-holdings').innerHTML=d.holdings.length?d.holdings.map(h=>
-    `<div class="analytics-entry"><div class="holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div></div><div class="holding-value"><strong>${html(fmt(h.value_trade,h.currency,2))}</strong><span class="${h.pnl_trade<0?'negative':''}">${html(fmt(h.pnl_trade,h.currency,2))}</span></div></div><div class="holding-details"><div><span>Quantity</span><b>${state.hidden?'••••':quantityFmt(h.quantity)}</b></div><div><span>Last price (${html(h.currency)})</span><b>${html(fmt(h.ltp,h.currency,2))}</b></div><div><span>Avg price (${html(h.currency)})</span><b>${html(fmt(h.avg,h.currency,2))}</b></div><div><span>Unrealized P/L (${html(h.currency)})</span><b>${html(fmt(h.pnl_trade,h.currency,2))}</b></div><div><span>Portfolio share</span><b>${state.hidden?'••••':compact(h.share,2)+'%'}</b></div><div><span>P/L (%)</span><b>${html(signedPct(h.pnl_trade_pct))}</b></div></div></div>`
+    `<div class="analytics-entry"><div class="holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${html(h.ticker||h.type)} · ${html(h.currency)}</div></div><div class="holding-value"><strong>${html(fmt(h.value_trade,h.currency,2))}</strong><span class="${h.pnl_trade<0?'negative':''}">${html(fmt(h.pnl_trade,h.currency,2))}</span></div></div><div class="holding-details"><div><span>Quantity</span><b>${state.hidden?'••••':quantityFmt(h.quantity)}</b></div><div><span>Last price (${html(h.currency)})</span><b>${html(fmt(h.ltp,h.currency,2))}</b></div><div><span>Avg price (${html(h.currency)})</span><b>${html(fmt(h.avg,h.currency,2))}</b></div><div><span>Unrealized P/L (${html(h.currency)})</span><b class="${h.pnl_trade<0?'negative':''}">${html(fmt(h.pnl_trade,h.currency,2))}</b></div><div><span>Portfolio share</span><b>${state.hidden?'••••':compact(h.share,2)+'%'}</b></div><div><span>P/L (%)</span><b class="${h.pnl_trade<0?'negative':''}">${html(signedPct(h.pnl_trade_pct))}</b></div></div></div>`
   ).join(''):emptyMessage('No investments found','Your holdings appear here after you add trades.','trade');
   activatePendingLogoSearch($('analytics-holdings'));
   renderCapitalChart();
 }
+
 // The backend already converts every holding's `value` into the account's base currency.
 // Sum by asset rather than trade currency, then calculate shares of invested assets.
 function capitalAllocation(holdings){
@@ -798,53 +845,151 @@ function renderCapitalChart(animate=false){
   }
   if(animate)animateCapitalTiles(target,previousRects,previousFocused,state.capitalFocus);
 }
+
 function renderChart(series){
   const target=$('history-chart');const points=series?.points||[];
   if(!points.length){if(state.chart){state.chart.clear();}target.innerHTML='<div class="empty" style="margin:30px 10px">Portfolio history will appear here when historical data is available.</div>';return;}
   if(state.chart && !target.querySelector('canvas')){state.chart.dispose();state.chart=null;target.innerHTML='';}
   const data=points.map(p=>[p.date,p.value]);
+  const dark = state.theme === 'dark';
+  const rising=data[data.length-1][1]>=data[0][1];
+  const color=rising?(dark?'#58e3fb':'#1b7fb3'):(dark?'#f27b89':'#c94052');
   if(typeof echarts==='undefined'){
     const ys=data.map(p=>p[1]);const min=Math.min(...ys);const max=Math.max(...ys);const width=640,height=230,pad=12;
     const path=ys.map((y,i)=>`${i?'L':'M'} ${(i/(ys.length-1||1)*width).toFixed(1)} ${(height-pad-(y-min)/(max-min||1)*(height-2*pad)).toFixed(1)}`).join(' ');
-    target.innerHTML=`<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:100%" preserveAspectRatio="none" role="img"><path d="${path}" fill="none" stroke="#59e4fc" stroke-width="3" vector-effect="non-scaling-stroke"/></svg>`;return;
+    target.innerHTML=`<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:100%" preserveAspectRatio="none" role="img"><path d="${path}" fill="none" stroke="${color}" stroke-width="2.6" vector-effect="non-scaling-stroke"/></svg>`;return;
   }
   if(!state.chart)state.chart=echarts.init(target);
-  const rising=data[data.length-1][1]>=data[0][1];
-  const color=rising?'#59e4fc':'#ed919b';
-  state.chart.setOption({animationDuration:340,grid:{left:4,right:5,top:16,bottom:12,containLabel:false},
+  const gradTop = rising
+    ? (dark ? 'rgba(88,227,251,.22)' : 'rgba(27,127,179,.18)')
+    : (dark ? 'rgba(242,123,137,.20)' : 'rgba(201,64,82,.15)');
+  const gradBot = rising
+    ? (dark ? 'rgba(88,227,251,0)' : 'rgba(27,127,179,0)')
+    : (dark ? 'rgba(242,123,137,0)' : 'rgba(201,64,82,0)');
+  const baseCcy = state.dashboard?.base_currency || state.user?.base_currency || 'SEK';
+  state.chart.setOption({animationDuration:280,grid:{left:4,right:5,top:16,bottom:12,containLabel:false},
     xAxis:{type:'time',boundaryGap:false,axisLine:{show:false},axisTick:{show:false},axisLabel:{show:false},splitLine:{show:false},min:data[0][0],max:data[data.length-1][0]},
     yAxis:{type:'value',scale:true,axisLabel:{show:false},axisLine:{show:false},axisTick:{show:false},splitLine:{show:false}},
-    tooltip:{trigger:'axis',confine:true,backgroundColor:state.theme==='dark'?'#23262c':'#fff',borderWidth:1,borderColor:state.theme==='dark'?'#343941':'#dfe4dc',textStyle:{color:state.theme==='dark'?'#edf3fc':'#252a24',fontSize:14},
-      formatter:(items)=>{if(!items?.length)return '';const p=items[0];return `<div style="font-size:13px;opacity:.7;margin-bottom:5px">${html(new Date(p.value[0]).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}))}</div><b>${html(fmt(p.value[1],state.dashboard.base_currency,0))}</b>`;}},
-    series:[{type:'line',data,symbol:'none',sampling:'lttb',smooth:false,lineStyle:{color,width:2.5},
-      areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:rising?'rgba(85,184,237,.19)':'rgba(237,145,155,.16)'},{offset:1,color:rising?'rgba(85,184,237,0)':'rgba(237,145,155,0)'}])}}]
+    tooltip:{
+      trigger:'axis',confine:true,
+      axisPointer:{type:'line',lineStyle:{color:dark?'rgba(255,255,255,.18)':'rgba(20,29,46,.16)',width:1,type:'dashed'}},
+      backgroundColor:dark?'rgba(20,24,31,.96)':'rgba(255,255,255,.97)',
+      borderWidth:1,borderColor:dark?'rgba(255,255,255,.12)':'rgba(15,23,42,.1)',
+      padding:[10,13],
+      textStyle:{color:dark?'#eef4fc':'#141d2e',fontSize:14},
+      formatter:(items)=>{if(!items?.length)return '';const p=items[0];return `<div style="font-size:12px;opacity:.68;margin-bottom:4px">${html(new Date(p.value[0]).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}))}</div><b style="font-variant-numeric:tabular-nums">${html(fmt(p.value[1],baseCcy,0))}</b>`;}
+    },
+    series:[{type:'line',data,symbol:'circle',symbolSize:6,showSymbol:false,sampling:'lttb',smooth:false,
+      itemStyle:{color},lineStyle:{color,width:2.4},
+      areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:gradTop},{offset:1,color:gradBot}])}}]
   },true);
   state.chart.resize();
 }
+
+function fetchHistorySpan(span){
+  const rev = state.historyRevision || '';
+  const inflightKey = rev + '|' + span;
+  if(inFlightHistory.has(inflightKey)) return inFlightHistory.get(inflightKey);
+  const req = api('/api/history?span='+encodeURIComponent(span))
+    .then(data=>{
+      if(data.history_revision){
+        if(state.historyRevision && state.historyRevision !== data.history_revision){
+          state.history = {};
+        }
+        state.historyRevision = data.history_revision;
+      }
+      state.history[span] = data;
+      return data;
+    })
+    .finally(()=>{ inFlightHistory.delete(inflightKey); });
+  inFlightHistory.set(inflightKey, req);
+  return req;
+}
+
+function prefetchRange(span){
+  if(!state.user || state.history[span]) return;
+  fetchHistorySpan(span).catch(()=>{});
+}
+
 async function loadRange(span){
-  state.historyRange=span;document.querySelectorAll('[data-range]').forEach(el=>el.classList.toggle('selected',el.dataset.range===span));
+  state.historyRange=span;
+  document.querySelectorAll('[data-range]').forEach(el=>el.classList.toggle('selected',el.dataset.range===span));
   if(state.history[span]){renderChart(state.history[span]);return;}
   $('history-loading').classList.remove('hidden');
-  const key=span;
-  try{const data=await api('/api/history?span='+encodeURIComponent(span));state.history[key]=data;
+  try{
+    const data=await fetchHistorySpan(span);
     if(state.historyRange===span)renderChart(data);
   }catch(e){toast('Portfolio history: '+e.message,true);}
   finally{if(state.historyRange===span)$('history-loading').classList.add('hidden');}
 }
+
+function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false){
+  const prevBase = state.dashboard?.base_currency;
+  const prevRev = state.historyRevision || state.dashboard?.history_revision;
+  const nextRev = d.history_revision || null;
+  const baseChanged = !!(prevBase && prevBase !== d.base_currency);
+  const revChanged = !!(prevRev && nextRev && prevRev !== nextRev);
+  if(baseChanged || revChanged){
+    state.history = {};
+    inFlightHistory.clear();
+  }
+  state.dashboard = d;
+  if(nextRev) state.historyRevision = nextRev;
+  renderDashboard();
+  renderAnalytics();
+  renderAccount();
+  if(preloadedHistory){
+    const targetSpan = preloadedHistory.range || state.historyRange;
+    state.history[targetSpan] = preloadedHistory;
+    if(state.view === 'home' && state.historyRange === targetSpan){
+      $('history-loading').classList.add('hidden');
+      renderChart(preloadedHistory);
+    }
+    return;
+  }
+  if(historyUnchanged && state.history[state.historyRange]){
+    // Revision matched: chart data is already fresh—skip network request & spinner.
+    if(state.view === 'home') renderChart(state.history[state.historyRange]);
+    return;
+  }
+  if(state.view === 'home') loadRange(state.historyRange);
+}
+
 async function reloadDashboard(showMessage=false){
   const d=await api('/api/dashboard');
-  if(state.dashboard && (state.dashboard.version!==d.version || state.dashboard.base_currency!==d.base_currency))state.history={};
-  state.dashboard=d;renderDashboard();renderAnalytics();
+  applyDashboardData(d);
   if(showMessage){toast(d.warnings.length?'Updated. '+d.warnings[0]:'Portfolio updated');}
-  if(state.view==='home')loadRange(state.historyRange);
 }
+
 async function refreshPortfolio(){
-  const btn=$('refresh-btn');btn.classList.add('is-refreshing');btn.disabled=true;
-  try{const result=await api('/api/refresh',{method:'POST'});await reloadDashboard();
+  const btn=$('refresh-btn');
+  if(btn.disabled)return;
+  btn.classList.add('is-refreshing');btn.disabled=true;
+  const label = btn.querySelector('.refresh-label');
+  if(label) label.textContent = 'Refreshing…';
+  try{
+    const knownRev = state.historyRevision || state.dashboard?.history_revision || '';
+    const params = new URLSearchParams({
+      include_dashboard: 'true',
+      include_history: 'true',
+      span: state.historyRange,
+      known_history_revision: knownRev
+    });
+    const result=await api('/api/refresh?' + params.toString(),{method:'POST'});
+    if(result.dashboard){
+      applyDashboardData(result.dashboard, result.history || null, !!result.history_unchanged);
+    }else{
+      await reloadDashboard();
+    }
     const failures=Object.keys(result.errors||{});
-    toast(`Updated ${result.updated}/${result.requested??0} latest prices${failures.length?`; unavailable: ${failures.join(', ')}`:''}`,!!failures.length);}
-  catch(e){toast(e.message,true);}finally{btn.classList.remove('is-refreshing');btn.disabled=false;}
+    toast(`Updated ${result.updated}/${result.requested??0} latest prices${failures.length?`; unavailable: ${failures.join(', ')}`:''}`,!!failures.length);
+  }catch(e){toast(e.message,true);}
+  finally{
+    btn.classList.remove('is-refreshing');btn.disabled=false;
+    if(label) label.textContent = 'Refresh';
+  }
 }
+
 function formTrade(form){const fd=new FormData(form);const val=Object.fromEntries(fd.entries());
   for(const f of ['quantity','price_trade_ccy','charges_trade_ccy','stt_trade_ccy','fx_to_base','last_price_trade_ccy','last_price_base'])val[f]=Number(val[f]??(f==='fx_to_base'?1:0));
   val.trade_date=val.trade_date.includes('T')?val.trade_date.replace('T',' '):val.trade_date+' 00:00';return val;
@@ -855,7 +1000,7 @@ function updateTradePreview(){const f=$('trade-form');let q=Number(f.elements.qu
 async function submitTrade(e){e.preventDefault();const form=e.currentTarget;const btn=form.querySelector('[type=submit]');
   try{btn.disabled=true;const payload={...formTrade(form),side:state.tradeSide,auto_fx:$('trade-auto-fx').checked};
     await api('/api/trades',{method:'POST',body:payload});form.reset();form.elements.trade_date.value=todayISO();$('trade-auto-fx').checked=true;$('trade-manual-fx').disabled=true;
-    state.history={};state.trades=[];await reloadDashboard();toast('Trade saved successfully');nav('home');
+    state.history={};state.historyRevision=null;inFlightHistory.clear();state.trades=[];await reloadDashboard();toast('Trade saved successfully');nav('home');
   }catch(err){toast(err.message,true);}finally{btn.disabled=false;updateTradePreview();}
 }
 async function loadTrades(){
@@ -864,9 +1009,15 @@ async function loadTrades(){
 }
 function renderTrades(){
   const target=$('trades-list');if(!target)return;
-  const query=$('history-search').value.trim().toLowerCase();
-  const rows=state.trades.filter(r=>`${r.asset} ${r.ticker} ${r.trade_ccy} ${r.side}`.toLowerCase().includes(query));
-  $('trade-count').textContent=`${rows.length} trades`;
+  const searchEl=$('history-search');
+  const query=searchEl?searchEl.value.trim().toLowerCase():'';
+  const clearBtn=$('history-search-clear');
+  if(clearBtn) clearBtn.classList.toggle('hidden',!query);
+  const rows=state.trades.filter(r=>{
+    if(state.sideFilter !== 'ALL' && r.side !== state.sideFilter) return false;
+    return `${r.asset} ${r.ticker} ${r.trade_ccy} ${r.side}`.toLowerCase().includes(query);
+  });
+  $('trade-count').textContent=`${rows.length} ${rows.length===1?'trade':'trades'}`;
   target.innerHTML=rows.length?rows.slice(0,state.tradeLimit).map(r=>{
     const total=r.price_trade_ccy*r.quantity;const buy=r.side==='BUY';
     return `<button class="trade-row" data-edit="${html(r.trade_id)}" type="button"><span class="trade-side ${buy?'buy':'sell'}">${buy?'↗':'↘'}</span><span class="trade-info"><strong>${html(r.asset)} <span class="side-label ${buy?'buy':'sell'}">${buy?'BUY':'SELL'}</span></strong><span>${html(r.trade_date.slice(0,10))} · ${state.hidden?'••••':quantityFmt(r.quantity)} units · ${html(r.ticker||r.asset_type)}</span></span><span class="trade-amount"><strong>${html(fmt(total,r.trade_ccy,2))}</strong><small>${html(fmt(r.price_trade_ccy,r.trade_ccy,2))}/unit</small></span></button>`;
@@ -883,12 +1034,14 @@ function openEdit(id){const row=state.trades.find(t=>t.trade_id===id);if(!row)re
 async function submitEdit(e){e.preventDefault();const row=state.trades.find(t=>t.trade_id===state.editId);if(!row)return;
   const val={...row,...formTrade(e.currentTarget),last_price_base:row.last_price_base};
   try{await api('/api/trades/'+encodeURIComponent(state.editId),{method:'PUT',body:val});$('edit-dialog').close();
+    state.history={};state.historyRevision=null;inFlightHistory.clear();
     await loadTrades();await reloadDashboard();toast('Trade updated');}
   catch(err){toast(err.message,true);}
 }
 async function deleteEdit(){const row=state.trades.find(t=>t.trade_id===state.editId);if(!row)return;
   if(!confirm(`Delete ${row.side} ${row.asset} on ${row.trade_date.slice(0,10)}?`))return;
   try{await api('/api/trades/'+encodeURIComponent(state.editId),{method:'DELETE'});$('edit-dialog').close();
+    state.history={};state.historyRevision=null;inFlightHistory.clear();
     await loadTrades();await reloadDashboard();toast('Trade deleted');}catch(e){toast(e.message,true);}
 }
 function taxDates(){const now=new Date(),end=todayISO();let start;
@@ -921,19 +1074,23 @@ function renderTax(report){
 }
 function renderAccount(){
   if(!state.user)return;
+  const initial = (state.user.name||'U')[0].toUpperCase();
+  const baseCcy = state.dashboard?.base_currency||state.user.base_currency;
   $('profile-name').textContent=state.user.name;
   $('profile-type').textContent=state.user.google?'Google account':'Local account';
   $('account-login-method').textContent=state.user.google?'Google sign-in':'Local username and password';
   $('account-google').classList.toggle('hidden',state.user.google||!state.user.google_enabled);
-  $('profile-avatar').textContent=(state.user.name||'U')[0].toUpperCase();
-  $('avatar-char').textContent=(state.user.name||'U')[0].toUpperCase();
-  $('base-select').value=state.dashboard?.base_currency||state.user.base_currency;
-  document.querySelectorAll('.base-label').forEach(el=>el.textContent=state.dashboard?.base_currency||state.user.base_currency);
+  $('profile-avatar').textContent=initial;
+  $('avatar-char').textContent=initial;
+  const sbChar = $('sidebar-avatar-char'); if(sbChar) sbChar.textContent=initial;
+  const sbName = $('sidebar-user-name'); if(sbName) sbName.textContent=state.user.name;
+  $('base-select').value=baseCcy;
+  document.querySelectorAll('.base-label').forEach(el=>el.textContent=baseCcy);
 }
 async function changeBase(e){const newBase=e.target.value;const oldBase=state.dashboard.base_currency;
   if(newBase===oldBase)return;
   e.target.disabled=true;
-  try{await api('/api/settings',{method:'PUT',body:{base_currency:newBase}});state.history={};
+  try{await api('/api/settings',{method:'PUT',body:{base_currency:newBase}});state.history={};state.historyRevision=null;inFlightHistory.clear();
     await reloadDashboard();renderAccount();toast('Base currency changed to '+newBase);
   }catch(error){e.target.value=oldBase;toast(error.message,true);}
   finally{e.target.disabled=false;}
@@ -941,15 +1098,34 @@ async function changeBase(e){const newBase=e.target.value;const oldBase=state.da
 async function importFile(e){const file=e.target.files[0];if(!file)return;
   if(!confirm(`Replace your current portfolio with ${file.name}? This overwrites existing trades. Download a backup first if needed.`)) {e.target.value='';return;}
   const form=new FormData();form.append('file',file);
-  try{const result=await api('/api/import',{method:'POST',body:form});state.history={};state.trades=[];
+  try{const result=await api('/api/import',{method:'POST',body:form});state.history={};state.historyRevision=null;inFlightHistory.clear();state.trades=[];
     await reloadDashboard();toast(`Imported ${result.count} trades successfully`);nav('home');}
   catch(err){toast(err.message,true);}finally{e.target.value='';}
 }
 function bindEvents(){
   bindAssetLogoImages();
-  document.querySelectorAll('[data-tab]').forEach(el=>el.addEventListener('click',()=>nav(el.dataset.tab)));
+  document.querySelectorAll('[data-tab]').forEach(el=>{
+    el.addEventListener('click',()=>nav(el.dataset.tab));
+    if(el.getAttribute('role')==='button'){
+      el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();nav(el.dataset.tab);}});
+    }
+  });
   document.addEventListener('click',e=>{const target=e.target.closest('[data-go]');if(target)nav(target.dataset.go);});
-  document.querySelectorAll('[data-range]').forEach(el=>el.addEventListener('click',()=>loadRange(el.dataset.range)));
+  document.querySelectorAll('[data-range]').forEach(el=>{
+    el.addEventListener('click',()=>loadRange(el.dataset.range));
+    el.addEventListener('pointerenter',()=>{ if(window.matchMedia('(hover: hover)').matches) prefetchRange(el.dataset.range); });
+  });
+  document.querySelectorAll('[data-sort]').forEach(el=>el.addEventListener('click',()=>{
+    state.homeSort = el.dataset.sort;
+    document.querySelectorAll('[data-sort]').forEach(b=>b.classList.toggle('active',b===el));
+    renderDashboard();
+  }));
+  document.querySelectorAll('[data-side-filter]').forEach(el=>el.addEventListener('click',()=>{
+    state.sideFilter = el.dataset.sideFilter;
+    state.tradeLimit = 55;
+    document.querySelectorAll('[data-side-filter]').forEach(b=>b.classList.toggle('active',b===el));
+    renderTrades();
+  }));
   $('main-holdings').addEventListener('click',e=>{
     const row=e.target.closest('.home-holding-row');
     if(row)toggleHomeHolding(row);
@@ -966,6 +1142,9 @@ function bindEvents(){
     if(tile)toggleCapitalFocus(tile.dataset.capitalAsset);
   });
   $('privacy-toggle').addEventListener('click',()=>toggleHidden(!state.hidden));
+  $('sidebar-privacy-toggle')?.addEventListener('click',()=>toggleHidden(!state.hidden));
+  $('theme-quick-toggle')?.addEventListener('click',()=>applyTheme(state.theme==='dark'?'light':'dark'));
+  $('sidebar-theme-toggle')?.addEventListener('click',()=>applyTheme(state.theme==='dark'?'light':'dark'));
   $('account-privacy').addEventListener('change',e=>toggleHidden(e.target.checked));
   document.querySelectorAll('[data-theme-choice]').forEach(b=>b.addEventListener('click',()=>applyTheme(b.dataset.themeChoice)));
   document.querySelectorAll('[data-auth]').forEach(el=>el.addEventListener('click',()=>{
@@ -987,6 +1166,7 @@ function bindEvents(){
   }));
   $('trade-auto-fx').addEventListener('change',e=>{ $('trade-manual-fx').disabled=e.target.checked; });
   $('history-search').addEventListener('input',()=>{state.tradeLimit=55;renderTrades();});
+  $('history-search-clear')?.addEventListener('click',()=>{$('history-search').value='';state.tradeLimit=55;renderTrades();$('history-search').focus();});
   $('load-more-trades').addEventListener('click',()=>{state.tradeLimit+=55;renderTrades();});
   $('trades-list').addEventListener('click',e=>{const row=e.target.closest('[data-edit]');if(row)openEdit(row.dataset.edit);});
   $('close-dialog').addEventListener('click',()=>$('edit-dialog').close());
@@ -999,20 +1179,39 @@ function bindEvents(){
   $('base-select').addEventListener('change',changeBase);
   $('file-export').addEventListener('click',()=>{window.location.href='/api/export/trades';});
   $('file-import').addEventListener('change',importFile);
-  $('logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});state.user=null;state.dashboard=null;state.trades=[];state.history={};expandedHomeHoldings.clear();showAuth();toast('Signed out');}catch(e){toast(e.message,true);}});
+  $('logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});state.user=null;state.dashboard=null;state.trades=[];state.history={};state.historyRevision=null;inFlightHistory.clear();expandedHomeHoldings.clear();showAuth();toast('Signed out');}catch(e){toast(e.message,true);}});
   window.addEventListener('resize',()=>{state.chart?.resize();fitCapitalTileLabels($('capital-chart'));});
 }
-async function startLoggedIn(){
-  state.user=await api('/api/me');if(!state.user.authenticated){showAuth();return;}
-  $('avatar-char').textContent=state.user.name[0].toUpperCase();
+
+async function startLoggedIn(prefetchedAccount=null){
+  const account = prefetchedAccount || await api('/api/me');
+  state.user=account;
+  if(!state.user.authenticated){showAuth();return;}
   renderAccount();showApp();nav('home');
-  try{await reloadDashboard();}catch(error){toast(error.message,true);}
+  // Fetch dashboard and initial 1M history concurrently instead of serially.
+  $('history-loading').classList.remove('hidden');
+  const dashReq = api('/api/dashboard');
+  const histReq = fetchHistorySpan(state.historyRange).catch(err=>{
+    toast('Portfolio history: '+err.message,true);
+    return null;
+  });
+  try{
+    const [d, h] = await Promise.all([dashReq, histReq]);
+    applyDashboardData(d, h || null, false);
+  }catch(error){
+    toast(error.message,true);
+  }finally{
+    $('history-loading').classList.add('hidden');
+  }
 }
-async function init(){bindEvents();applyTheme(state.theme);toggleHidden(state.hidden);
-  try{const account=await api('/api/me');
+
+async function init(){
+  bindEvents();applyTheme(state.theme);toggleHidden(state.hidden);
+  try{
+    const account=await api('/api/me');
     $('google-container').classList.toggle('hidden',!account.google_enabled);
     $('google-hint').classList.toggle('hidden',!!account.google_enabled);
-    if(account.authenticated){state.user=account;await startLoggedIn();}else showAuth();
+    if(account.authenticated){await startLoggedIn(account);}else showAuth();
   }catch(error){showAuth();toast(error.message,true);}
 }
 init();
