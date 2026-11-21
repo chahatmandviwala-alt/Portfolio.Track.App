@@ -75,7 +75,7 @@ function applyTheme(theme){
   state.theme=theme==='light'?'light':'dark';localStorage.setItem('track-theme',state.theme);
   document.documentElement.dataset.theme=state.theme;
   const themeMeta = document.querySelector('meta[name="theme-color"]');
-  if(themeMeta) themeMeta.content=state.theme==='dark'?'#090b0e':'#f3f5f9';
+  if(themeMeta) themeMeta.content=state.theme==='dark'?'#090b0e':'#efeae1';
   document.querySelectorAll('[data-theme-choice]').forEach(b=>{
     const selected=b.dataset.themeChoice===state.theme;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));
   });
@@ -875,10 +875,10 @@ function renderChart(series){
     tooltip:{
       trigger:'axis',confine:true,
       axisPointer:{type:'line',lineStyle:{color:dark?'rgba(255,255,255,.18)':'rgba(20,29,46,.16)',width:1,type:'dashed'}},
-      backgroundColor:dark?'rgba(20,24,31,.96)':'rgba(255,255,255,.97)',
-      borderWidth:1,borderColor:dark?'rgba(255,255,255,.12)':'rgba(15,23,42,.1)',
+      backgroundColor:dark?'rgba(20,24,31,.96)':'rgba(248,245,239,.97)',
+      borderWidth:1,borderColor:dark?'rgba(255,255,255,.12)':'rgba(38,32,22,.12)',
       padding:[10,13],
-      textStyle:{color:dark?'#eef4fc':'#141d2e',fontSize:14},
+      textStyle:{color:dark?'#eef4fc':'#1f1d1a',fontSize:14},
       formatter:(items)=>{if(!items?.length)return '';const p=items[0];return `<div style="font-size:12px;opacity:.68;margin-bottom:4px">${html(new Date(p.value[0]).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}))}</div><b style="font-variant-numeric:tabular-nums">${html(fmt(p.value[1],baseCcy,0))}</b>`;}
     },
     series:[{type:'line',data,symbol:'circle',symbolSize:6,showSymbol:false,sampling:'lttb',smooth:false,
