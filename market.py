@@ -3,11 +3,15 @@
 Drop-in replacement for the original market.py: preserves public function signatures,
 calculation methods, warning semantics and market_cache table layout.
 
-Optimizations: batch cache queries/UPSERTs, reuse overlapping historic date ranges,
-refresh recent dates instead of expiring all old history, keep bounded RAM caches,
-fetch compact Yahoo latest-quote payloads, skip closed zero-quantity assets when
-building windowed daily histories, prevent slow NSE failures from blocking Yahoo
-fetches, and avoid unnecessary deep copies on chart cache hits.
+Optimizations:
+- Batch Yahoo latest quotes via /v7/finance/quote (with cached crumb) in a single HTTP
+  call for all tickers, with automatic high-concurrency /v8/finance/chart fallback.
+- Non-blocking NSE EOD close racing so slow/blocked cloud-IP NSE requests never stall
+  portfolio refreshes beyond a tight time budget.
+- Skip query1 host retries on definitive 400/404/422 client errors.
+- Batch cache queries/UPSERTs, reuse overlapping historic date ranges, skip closed
+  zero-quantity assets in windowed histories, bounded RAM caches, and zero-wait RAM
+  history peek for /api/refresh.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, time as daytime
 
@@ -33,13 +37,15 @@ from storage import MarketCache, Session, engine
 
 _LOG = logging.getLogger('uvicorn.error')
 HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; PortfolioTracker/1.0)', 'Accept': 'application/json'}
+_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 _HIST_REFRESH_HOURS = max(1., float(os.getenv('HISTORICAL_REFRESH_HOURS', '12')))
 _FX_REFRESH_HOURS = max(1., float(os.getenv('FX_REFRESH_HOURS', '12')))
 _NSE_OFFICIAL_CLOSE = os.getenv('NSE_OFFICIAL_CLOSE', '1').strip().lower() not in ('0', 'false', 'no')
 _NSE_EOD_COOLDOWN = max(120, int(os.getenv('NSE_EOD_COOLDOWN_SECONDS', '900')))
+_NSE_EOD_RACE_BUDGET = max(0.5, min(4.0, float(os.getenv('NSE_EOD_WAIT_SECONDS', '1.6'))))
 _QUOTE_TTL = max(0, int(os.getenv('QUOTE_CACHE_SECONDS', '30')))
 _NSE_COOLDOWN = max(60, int(os.getenv('NSE_COOLDOWN_SECONDS', '1800')))
-_MAX_WORKERS = max(4, min(16, int(os.getenv('MARKET_FETCH_WORKERS', '12'))))
+_MAX_WORKERS = max(8, min(24, int(os.getenv('MARKET_FETCH_WORKERS', '20'))))
 # Yahoo-first is much faster when NSE blocks cloud IPs. Set PRICE_SOURCE_PRIORITY=nse
 # to restore NSE-first behavior (at the expense of slower cloud refreshes).
 _PREFER_NSE = os.getenv('PRICE_SOURCE_PRIORITY', 'yahoo').strip().lower() == 'nse'
@@ -58,10 +64,13 @@ _chart_rows: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
 _nse_block_until = 0.0
 _nse_eod_block_until = 0.0
 _nse_eod_missing_dates: dict[str, float] = {}
+_yahoo_crumb_lock = threading.Lock()
+_yahoo_crumb_state: tuple[float, str, dict] | None = None
+_yahoo_crumb_block_until = 0.0
 _http_local = threading.local()
-# A process-wide pool reuses provider connections across requests and caps upstream concurrency.
+# Separate I/O worker pool and coordination pool so parent tasks never deadlock waiting on child I/O.
 _io_pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix='market-io')
-_coord_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='market-coord')
+_coord_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix='market-coord')
 _pending_io: dict[tuple, Future] = {}
 _pending_charts: dict[tuple, Future] = {}
 
@@ -87,7 +96,7 @@ def _http() -> requests.Session:
     if session is None:
         session = requests.Session()
         session.headers.update(HEADERS)
-        adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=24, pool_maxsize=24)
         session.mount('https://', adapter)
         _http_local.session = session
     return session
@@ -126,8 +135,6 @@ def _read_cached(keys: list[str]) -> dict[str, _CacheRecord]:
                     continue
         with _cache_lock:
             for key in missing:
-                # Cache database misses briefly too: parallel dashboard + history reads
-                # should not repeat identical SELECTs for missing rows.
                 item = found.get(key)
                 _local_rows[key] = (now + (900 if item is not None else 30), item)
                 _local_rows.move_to_end(key)
@@ -191,8 +198,6 @@ def _fetch_windows(entry: _CacheRecord | None, start: date, end: date,
                    fresh_hours: float, force: bool) -> list[tuple[date, date]]:
     if force or entry is None:
         return [(start, end)]
-    # A cached empty result may represent a bad or delisted ticker. Recheck it
-    # periodically rather than contacting the provider on *every* chart load.
     if not entry.values:
         age = (datetime.now(timezone.utc) - entry.fetched).total_seconds()
         return [(start, end)] if age > 180 else []
@@ -203,9 +208,7 @@ def _fetch_windows(entry: _CacheRecord | None, start: date, end: date,
         windows.append((max(start, entry.end + timedelta(days=1)), end))
     age_hours = (datetime.now(timezone.utc) - entry.fetched).total_seconds() / 3600
     if age_hours >= fresh_hours and end >= date.today() - timedelta(days=14):
-        # Old closes and old FX rates don't expire; refresh only recent dates.
         windows.append((max(start, end - timedelta(days=10)), end))
-    # Coalesce overlap between "extend missing dates" and "refresh recent dates".
     windows = sorted((a, b) for a, b in windows if a <= b)
     combined = []
     for a, b in windows:
@@ -218,9 +221,6 @@ def _fetch_windows(entry: _CacheRecord | None, start: date, end: date,
 
 def _merge_cache(entry: _CacheRecord | None, windows: list[tuple[date, date]],
                  results: list[dict], stamp: datetime) -> _CacheRecord:
-    # The single-row schema stores one contiguous coverage interval. Do not
-    # incorrectly claim that a gap between two disjoint requests was fetched.
-    # Prefer retaining the new range over inventing missing historical dates.
     if entry is not None and windows and (
         max(b for _, b in windows) < entry.start - timedelta(days=1) or
         min(a for a, _ in windows) > entry.end + timedelta(days=1)
@@ -237,25 +237,29 @@ def _merge_cache(entry: _CacheRecord | None, windows: list[tuple[date, date]],
     return _CacheRecord(min(starts), max(ends), stamp, values)
 
 
-def _yahoo_chart(ticker: str, params: dict) -> dict:
-    """Try both public Yahoo chart hosts with bounded connect/read timeouts."""
+def _yahoo_chart(ticker: str, params: dict, timeout: tuple[float, float] = (1.6, 3.2)) -> dict:
+    """Try public Yahoo chart hosts with bounded timeouts and fast failure on 4xx."""
     last_error = None
     for host in ('query2.finance.yahoo.com', 'query1.finance.yahoo.com'):
         try:
             url = f'https://{host}/v8/finance/chart/{requests.utils.quote(ticker, safe="")}'
-            response = _http().get(url, params=params, timeout=(2.0, 4.5))
-            # Trying another host after a 429 usually worsens rate-limiting.
+            response = _http().get(url, params=params, timeout=timeout)
             if response.status_code == 429:
                 raise ValueError('Yahoo Finance rate limited requests (HTTP 429)')
+            if response.status_code in (400, 404, 422):
+                # Invalid/delisted ticker won't exist on the secondary host either.
+                raise ValueError(f'Yahoo ticker not found (HTTP {response.status_code})')
             response.raise_for_status()
             payload = response.json().get('chart') or {}
             results = payload.get('result') or []
             if results:
                 return results[0]
             last_error = ValueError('No chart data returned')
+            break
         except (requests.RequestException, ValueError, KeyError) as exc:
             last_error = exc
-            if 'rate limited' in str(exc).lower():
+            msg = str(exc).lower()
+            if 'rate limited' in msg or 'not found' in msg:
                 break
     raise ValueError(f'Yahoo quote unavailable: {type(last_error).__name__}')
 
@@ -266,6 +270,116 @@ def _positive_price(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return round(price, 8) if np.isfinite(price) and price > 0 else None
+
+
+def _get_yahoo_crumb() -> tuple[str, dict] | None:
+    """Acquire and cache a Yahoo Finance session cookie + crumb for batch v7 quotes."""
+    global _yahoo_crumb_state, _yahoo_crumb_block_until
+    now = time.monotonic()
+    with _yahoo_crumb_lock:
+        if _yahoo_crumb_state and _yahoo_crumb_state[0] > now:
+            return _yahoo_crumb_state[1], _yahoo_crumb_state[2]
+        if now < _yahoo_crumb_block_until:
+            return None
+        try:
+            sess = requests.Session()
+            sess.headers.update({'User-Agent': _BROWSER_UA, 'Accept': '*/*'})
+            # fc.yahoo.com returns 404 while setting the required A3 cookie.
+            sess.get('https://fc.yahoo.com', timeout=(1.2, 2.0), allow_redirects=True)
+            resp = sess.get('https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=(1.2, 2.0))
+            if resp.status_code == 200:
+                crumb = (resp.text or '').strip()
+                if crumb and len(crumb) < 64 and '<' not in crumb:
+                    cookies = sess.cookies.get_dict()
+                    _yahoo_crumb_state = (time.monotonic() + 3600, crumb, cookies)
+                    return crumb, cookies
+        except requests.RequestException:
+            pass
+        _yahoo_crumb_block_until = time.monotonic() + 600
+        return None
+
+
+def _invalidate_yahoo_crumb(cooldown: float = 600.0) -> None:
+    global _yahoo_crumb_state, _yahoo_crumb_block_until
+    with _yahoo_crumb_lock:
+        _yahoo_crumb_state = None
+        _yahoo_crumb_block_until = time.monotonic() + cooldown
+
+
+def _fetch_yahoo_batch(tickers: list[str]) -> dict[str, dict]:
+    """Fetch up to ~45 quotes per single HTTP request via Yahoo v7 quote endpoint.
+
+    Returns only verified positive quotes; any missed tickers seamlessly fall back
+    to the concurrent /v8/finance/chart/ path.
+    """
+    if len(tickers) < 2:
+        return {}
+    auth = _get_yahoo_crumb()
+    if not auth:
+        return {}
+    crumb, cookies = auth
+    canonical = {t.upper(): t for t in tickers}
+    results: dict[str, dict] = {}
+    headers = {'User-Agent': _BROWSER_UA, 'Accept': 'application/json'}
+    chunk_size = 45
+    chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
+
+    def fetch_chunk(batch: list[str]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        try:
+            resp = _http().get(
+                'https://query2.finance.yahoo.com/v7/finance/quote',
+                params={
+                    'symbols': ','.join(batch),
+                    'crumb': crumb,
+                    'fields': 'symbol,regularMarketPrice,regularMarketTime,currency',
+                },
+                headers=headers,
+                cookies=cookies,
+                timeout=(1.4, 2.6),
+            )
+            if resp.status_code in (401, 403):
+                _invalidate_yahoo_crumb(600.0)
+                return {}
+            if resp.status_code != 200:
+                return {}
+            items = ((resp.json().get('quoteResponse') or {}).get('result')) or []
+            for item in items:
+                sym = str(item.get('symbol') or '').strip().upper()
+                ticker = canonical.get(sym)
+                if not ticker:
+                    continue
+                if ticker.upper().endswith('.NS') and str(item.get('currency') or '').upper() != 'INR':
+                    continue
+                price = _positive_price(item.get('regularMarketPrice'))
+                if price is None:
+                    continue
+                stamp = item.get('regularMarketTime')
+                as_of = ''
+                if stamp:
+                    try:
+                        as_of = datetime.fromtimestamp(int(stamp), timezone.utc).isoformat()
+                    except (TypeError, ValueError, OSError):
+                        as_of = ''
+                out[ticker] = {
+                    'price': price,
+                    'source': 'Yahoo Finance intraday' + (' (not NSE official close)' if ticker.upper().endswith('.NS') else ''),
+                    'as_of': as_of,
+                }
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            return {}
+        return out
+
+    if len(chunks) == 1:
+        results.update(fetch_chunk(chunks[0]))
+    else:
+        futs = [_io_pool.submit(fetch_chunk, c) for c in chunks]
+        for fut in as_completed(futs):
+            try:
+                results.update(fut.result())
+            except Exception:
+                pass
+    return results
 
 
 # Official NSE *closing* prices are different from the last traded price.
@@ -300,11 +414,7 @@ def _nse_report_dates(now: datetime | None = None) -> list[date]:
 
 
 def _parse_nse_bhavcopy(content: bytes, report_day: date) -> dict[str, float]:
-    """Parse the NSE UDiFF equity bhavcopy; use ClsPric, never LastPric.
-
-    Restricts archive size and validates column names, security series and
-    business date. Malformed reports must not be cached as authoritative.
-    """
+    """Parse the NSE UDiFF equity bhavcopy; use ClsPric, never LastPric."""
     if not content or len(content) > 5_000_000:
         raise ValueError('Unexpected NSE report size')
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
@@ -334,7 +444,6 @@ def _parse_nse_bhavcopy(content: bytes, report_day: date) -> dict[str, float]:
                     except ValueError:
                         pass
                 if parsed != report_day:
-                    # Never insert another day's price into a cached snapshot.
                     continue
                 value = _positive_price(row.get('ClsPric'))
                 if value is None:
@@ -382,23 +491,18 @@ def _parse_nse_full_csv(content: bytes, report_day: date) -> dict[str, float]:
 
 
 def _download_nse_bhavcopy(day: date) -> dict[str, float]:
-    """Use compressed UDiFF file, falling back to official full CSV on 404.
-
-    NSE can reject calls from hosted cloud IPs. Do not substitute an intraday
-    value and call it a close when its authoritative reports are unreachable.
-    """
+    """Use compressed UDiFF file, falling back to official full CSV on 404."""
     name = f'BhavCopy_NSE_CM_0_0_0_{day:%Y%m%d}_F_0000.csv.zip'
     url = f'https://nsearchives.nseindia.com/content/cm/{name}'
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'User-Agent': _BROWSER_UA,
         'Accept': 'application/zip,text/csv,*/*',
         'Referer': 'https://www.nseindia.com/',
     }
-    response = _http().get(url, headers=headers, timeout=(1.8, 3.2))
+    response = _http().get(url, headers=headers, timeout=(1.4, 2.5))
     if response.status_code == 404:
-        # Published alternative equity report (same exchange, not a third party).
         alternate = f'https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{day:%d%m%Y}.csv'
-        fallback = _http().get(alternate, headers=headers, timeout=(1.8, 3.2))
+        fallback = _http().get(alternate, headers=headers, timeout=(1.4, 2.5))
         fallback.raise_for_status()
         return _parse_nse_full_csv(fallback.content, day)
     response.raise_for_status()
@@ -418,11 +522,7 @@ def _cached_nse_eod() -> tuple[date | None, dict[str, float]]:
 
 
 def _load_latest_nse_eod() -> tuple[date | None, dict[str, float]]:
-    """Return latest official close for every NSE equity via one shared file.
-
-    DB rows are PUBLIC market data, not a user portfolio. Fail closed to the
-    existing quote provider if the exchange blocks cloud traffic.
-    """
+    """Return latest official close for every NSE equity via one shared file."""
     global _nse_eod_block_until
     days = _nse_report_dates()
     now = time.monotonic()
@@ -438,7 +538,6 @@ def _load_latest_nse_eod() -> tuple[date | None, dict[str, float]]:
             if now < _nse_eod_block_until:
                 return None, {}
             if now < _nse_eod_missing_dates.get(key, 0):
-                # A missing report can be due to a market holiday. Try older.
                 continue
         if attempts >= 2:
             break
@@ -454,8 +553,6 @@ def _load_latest_nse_eod() -> tuple[date | None, dict[str, float]]:
             if exc.response is not None and exc.response.status_code in (404, 410):
                 with _cache_lock:
                     _nse_eod_missing_dates[key] = now + 1200
-                # On a normal weekday after close, a not-yet-published
-                # report must NOT turn yesterday's close into today's quote.
                 if day == datetime.now(_IST).date():
                     break
                 continue
@@ -469,13 +566,13 @@ def _load_latest_nse_eod() -> tuple[date | None, dict[str, float]]:
             _LOG.warning('NSE official EOD feed unavailable (%s); using marked fallback', type(exc).__name__)
             break
         except Exception:
-            # Do not allow a transient Supabase cache failure to block prices.
             _LOG.exception('NSE report cache failure')
             break
     return None, {}
 
 
-def _nse_official_quotes(tickers: list[str], report: Future | None = None) -> dict[str, dict]:
+def _nse_official_quotes(tickers: list[str], report: Future | None = None,
+                         timeout: float | None = None) -> dict[str, dict]:
     if not tickers:
         return {}
     if report is None:
@@ -483,7 +580,9 @@ def _nse_official_quotes(tickers: list[str], report: Future | None = None) -> di
             return {}
         report = _submit_io(('nse-report', datetime.now(_IST).date()), _load_latest_nse_eod)
     try:
-        day, closes = report.result()
+        day, closes = report.result(timeout=timeout)
+    except FuturesTimeout:
+        return {}
     except Exception:
         _LOG.exception('Unable to retrieve NSE closing prices; using fallback')
         return {}
@@ -499,12 +598,7 @@ def _nse_official_quotes(tickers: list[str], report: Future | None = None) -> di
 
 
 def _overlay_official_nse_history(prices: dict, end: date) -> dict:
-    """Correct the most recent NSE daily close when official data is cached.
-
-    A chart should not silently mix Yahoo's last-trade value into its official
-    closing value for the most recent completed NSE session. Does not fetch a
-    new NSE report itself: refresh may already have loaded/cached the snapshot.
-    """
+    """Correct the most recent NSE daily close when official data is cached."""
     if not _NSE_OFFICIAL_CLOSE or not any(t.upper().endswith('.NS') for t in prices):
         return prices
     candidate_days = _nse_report_dates()
@@ -530,7 +624,7 @@ def _fetch_nse_quote(ticker: str) -> dict:
         raise ValueError('Invalid NSE ticker')
     page = f'https://www.nseindia.com/get-quotes/equity?symbol={requests.utils.quote(symbol)}'
     headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'User-Agent': _BROWSER_UA,
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': page,
@@ -538,9 +632,9 @@ def _fetch_nse_quote(ticker: str) -> dict:
     try:
         with requests.Session() as session:
             session.headers.update(headers)
-            session.get('https://www.nseindia.com/', timeout=(1.8, 3.5)).raise_for_status()
+            session.get('https://www.nseindia.com/', timeout=(1.4, 2.4)).raise_for_status()
             response = session.get('https://www.nseindia.com/api/quote-equity',
-                                   params={'symbol': symbol}, timeout=(1.8, 3.5))
+                                   params={'symbol': symbol}, timeout=(1.4, 2.4))
             response.raise_for_status()
             data = response.json()
     except (requests.RequestException, ValueError):
@@ -558,8 +652,9 @@ def _fetch_nse_quote(ticker: str) -> dict:
 
 
 def _fetch_yahoo_latest(ticker: str) -> dict:
-    """Fetch compact metadata quote first (~1 KB); fall back to 5m candles only if needed."""
-    info = _yahoo_chart(ticker, {'range': '1d', 'interval': '1d', 'includePrePost': 'false'})
+    """Fetch compact metadata quote first (~1 KB); fall back to 5d/1d only if needed."""
+    info = _yahoo_chart(ticker, {'range': '1d', 'interval': '1d', 'includePrePost': 'false'},
+                        timeout=(1.4, 2.6))
     meta = info.get('meta') or {}
     if ticker.upper().endswith('.NS') and str(meta.get('currency', '')).upper() != 'INR':
         raise ValueError('Yahoo returned a non-INR quote for an NSE stock')
@@ -568,7 +663,8 @@ def _fetch_yahoo_latest(ticker: str) -> dict:
         candles = ((info.get('indicators') or {}).get('quote') or [{}])[0].get('close') or []
         price = next((_positive_price(x) for x in reversed(candles) if _positive_price(x)), None)
     if price is None:
-        info = _yahoo_chart(ticker, {'range': '5d', 'interval': '5m', 'includePrePost': 'false'})
+        info = _yahoo_chart(ticker, {'range': '5d', 'interval': '1d', 'includePrePost': 'false'},
+                            timeout=(1.4, 2.6))
         meta = info.get('meta') or {}
         if ticker.upper().endswith('.NS') and str(meta.get('currency', '')).upper() != 'INR':
             raise ValueError('Yahoo returned a non-INR quote for an NSE stock')
@@ -593,8 +689,14 @@ def _fetch_yahoo_latest(ticker: str) -> dict:
 def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
     """Latest traded quotes, preserving original (quotes, errors) API.
 
-    Yahoo-first is default on free hosting. NSE is used when Yahoo fails or when
-    PRICE_SOURCE_PRIORITY=nse. Store the source and as_of from the provider.
+    Fast path:
+    1. Serve RAM-cached quotes and cached NSE official EOD closes immediately.
+    2. Start uncached NSE EOD download in parallel (never blocking Yahoo!).
+    3. Fetch all remaining tickers in ONE Yahoo v7 batch HTTP call (when crumb is
+       available), falling back to 20-way parallel Yahoo v8 chart calls only for
+       any symbols not returned by the batch call.
+    4. If NSE EOD finishes within the tight race budget, overlay official NSE closes
+       on .NS symbols; otherwise return Yahoo's .NS quotes without stalling.
     """
     names = list(dict.fromkeys(t.strip() for t in tickers if t and t.strip()))
     quotes, errors, missing = {}, {}, []
@@ -624,9 +726,7 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
         indian = [ticker for ticker in missing if ticker.upper().endswith('.NS')]
         check_close = bool(indian) and _NSE_OFFICIAL_CLOSE and mode == 'eod'
         report = None
-        waiting: set[str] = set()
         if check_close:
-            # Resolve immediately from RAM/DB cache if today's/latest NSE close is already stored.
             cached_day, cached_closes = _cached_nse_eod()
             if cached_day and cached_closes:
                 for ticker in indian:
@@ -639,26 +739,33 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
                         }
                 indian = [t for t in indian if t not in quotes]
             elif time.monotonic() >= _nse_eod_block_until:
+                # Race NSE EOD in the background alongside Yahoo instead of blocking .NS symbols.
                 report = _submit_io(('nse-report', datetime.now(_IST).date()), _load_latest_nse_eod)
-                waiting = set(indian)
 
-        # Non-NSE symbols (and any NSE symbols when NSE EOD is cached/blocked) run immediately.
-        futures = {
-            _submit_io(('quote', mode, t), fetch, t): t
-            for t in missing if t not in quotes and t not in waiting
-        }
-        if report is not None:
-            official = _nse_official_quotes(indian, report)
-            quotes.update(official)
-            for ticker in indian:
-                if ticker not in official:
-                    futures[_submit_io(('quote', mode, ticker), fetch, ticker)] = ticker
-        for future in as_completed(futures):
-            ticker = futures[future]
-            try:
-                quotes[ticker] = future.result()
-            except Exception as exc:
-                errors[ticker] = str(exc)
+        to_fetch = [t for t in missing if t not in quotes]
+        if to_fetch and not _PREFER_NSE:
+            batch_hits = _fetch_yahoo_batch(to_fetch)
+            quotes.update(batch_hits)
+            to_fetch = [t for t in to_fetch if t not in quotes]
+
+        if to_fetch:
+            futures = {_submit_io(('quote', mode, t), fetch, t): t for t in to_fetch}
+            for future in as_completed(futures):
+                ticker = futures[future]
+                try:
+                    quotes[ticker] = future.result()
+                except Exception as exc:
+                    errors[ticker] = str(exc)
+
+        if report is not None and indian:
+            # Give NSE EOD at most a short remaining window so a slow cloud host never stalls refresh.
+            remaining_budget = max(0.05, _NSE_EOD_RACE_BUDGET - (time.perf_counter() - begin))
+            official = _nse_official_quotes(indian, report, timeout=remaining_budget)
+            if official:
+                quotes.update(official)
+                for ticker in official:
+                    errors.pop(ticker, None)
+
         if _QUOTE_TTL:
             with _cache_lock:
                 expires = time.monotonic() + _QUOTE_TTL
@@ -678,7 +785,8 @@ def _fetch_chart(ticker: str, start: date, end: date) -> dict:
     start_epoch = int(pd.Timestamp(start, tz='UTC').timestamp())
     end_epoch = int((pd.Timestamp(end, tz='UTC') + pd.Timedelta(days=2)).timestamp())
     info = _yahoo_chart(ticker, {'period1': start_epoch, 'period2': end_epoch,
-                                 'interval': '1d', 'events': 'history'})
+                                 'interval': '1d', 'events': 'history'},
+                        timeout=(1.8, 4.0))
     ts = info.get('timestamp') or []
     closes = (info.get('indicators', {}).get('quote') or [{}])[0].get('close') or []
     utc_offset = int(info.get('meta', {}).get('gmtoffset', 0) or 0)
@@ -726,9 +834,6 @@ def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool
                 chunk = fut.result()
                 if not isinstance(chunk, dict):
                     raise TypeError('provider did not return a dictionary')
-                # A completely empty response spanning business days is
-                # commonly a transient API failure, not a successful update.
-                # Never mark the whole gap as covered in that situation.
                 if not chunk and jobs[symbol][1] is not None and jobs[symbol][1].values and len(pd.bdate_range(a, b)) > 0:
                     raise ValueError('No refreshed business-day data; retaining prior prices')
                 completed[symbol].append(((a, b), chunk))
@@ -740,11 +845,9 @@ def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool
         for symbol, (key, entry, windows) in jobs.items():
             parts = completed[symbol]
             if failed[symbol] or len(parts) != len(windows):
-                # Briefly negative-cache a completely unavailable symbol to stop
-                # outages/invalid tickers from blocking every chart request.
                 if entry is None:
                     to_save[key] = _CacheRecord(start, end, stamp, {})
-                continue  # Do not mark missing dates covered after network failure.
+                continue
             parts.sort(key=lambda part: part[0][0])
             updated = _merge_cache(entry, [p[0] for p in parts], [p[1] for p in parts], stamp)
             to_save[key] = updated
@@ -756,7 +859,6 @@ def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool
         try:
             _write_cached(to_save)
         except Exception:
-            # A healthy external response should still be usable for this request.
             _LOG.exception('Could not persist market cache batch')
         _LOG.info('market.historical_fetch seconds=%.2f symbols=%d windows=%d errors=%d',
                   time.perf_counter()-begin, len(jobs), len(future_map), len(errors))
@@ -778,7 +880,7 @@ def _fetch_fx_series(ccy: str, base: str, start: date, end: date) -> dict:
         factor = (0.01 if ccy == 'GBX' else 1)/(0.01 if base == 'GBX' else 1)
         return {str(d.date()): factor for d in pd.date_range(start, end)}
     url = f'https://api.frankfurter.dev/v1/{start.isoformat()}..{end.isoformat()}'
-    response = _http().get(url, params={'base': src, 'symbols': dest}, timeout=(2.0, 5.5))
+    response = _http().get(url, params={'base': src, 'symbols': dest}, timeout=(1.5, 3.8))
     response.raise_for_status()
     raw = response.json().get('rates', {})
     factor = (0.01 if ccy == 'GBX' else 1)/(0.01 if base == 'GBX' else 1)
@@ -861,8 +963,6 @@ def history_revision(df: pd.DataFrame, base: str) -> str:
             try:
                 cached = _read_cached(keys)
             except Exception:
-                # Close metadata only affects the chart key. A cache outage must not
-                # prevent the dashboard from displaying a stored portfolio valuation.
                 _LOG.exception('Could not read NSE close metadata for chart revision')
                 digest.update(b'close-metadata-unavailable')
                 cached = {}
@@ -882,6 +982,19 @@ def _shallow_chart_copy(result: dict) -> dict:
         'estimated_assets': list(result.get('estimated_assets', ())),
         'excluded_assets': list(result.get('excluded_assets', ())),
     }
+
+
+def peek_cached_history(span: str, *, revision: str, owner=None) -> dict | None:
+    """Instant non-blocking RAM cache check used by /api/refresh."""
+    if not revision or span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
+        return None
+    key = (owner, revision, span)
+    with _cache_lock:
+        hit = _chart_rows.get(key)
+        if hit and hit[0] > time.monotonic():
+            _chart_rows.move_to_end(key)
+            return _shallow_chart_copy(hit[1])
+    return None
 
 
 def portfolio_history(df: pd.DataFrame, base: str, span: str, *, revision=None, owner=None) -> dict:
@@ -936,11 +1049,7 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     delta['signed_qty'] = delta.quantity * np.where(delta.side == 'BUY',1,-1)
     changes = delta.pivot_table(index='trade_date', columns='asset', values='signed_qty',
                                 aggfunc='sum', fill_value=0)
-    # Cumulative balances change only on trade dates. Preserve pre-window balances
-    # and clip *after* summation, including portfolios with historical oversells.
     changes = changes.sort_index().cumsum().clip(lower=0).reindex(idx, method='ffill').fillna(0)
-    # Assets with zero balance across the entire requested window contribute 0 on every
-    # date; skip fetching market history for already-closed positions outside the window.
     active_cols = [col for col in changes.columns if changes[col].gt(0).any()]
     if not active_cols:
         max_points = 920
@@ -962,13 +1071,11 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     ccys = latest.trade_ccy.reindex(assets).tolist()
     market_start = start - timedelta(days=10)
     begin = time.perf_counter()
-    # One SQL SELECT for both Yahoo-price and FX cache keys.
     price_keys = {'price:' + t for t in tickers if t}
     fx_keys = {f'fx:{ccy}:{base}' for ccy in ccys if ccy != base}
     if price_keys or fx_keys:
         _read_cached(sorted(price_keys | fx_keys))
     if price_keys and fx_keys:
-        # Network misses for prices and FX are independent: run simultaneously on shared pool.
         fjob = _coord_pool.submit(get_fx_series, ccys, base, market_start, end)
         prices, price_errors = get_prices(tickers, market_start, end)
         fxs, fx_errors = fjob.result()
@@ -976,9 +1083,8 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
         prices, price_errors = get_prices(tickers, market_start, end)
         fxs, fx_errors = get_fx_series(ccys, base, market_start, end)
     prices_elapsed = time.perf_counter() - begin
-    fx_elapsed = 0.0  # concurrent, included in wall-clock time above
+    fx_elapsed = 0.0
     prices = _overlay_official_nse_history(prices, end)
-    # Last row in CSV order on each trade day, as in the original price/FX fallback.
     daily_trades = df[df.asset.isin(assets)].assign(day=delta.loc[df.asset.isin(assets), 'trade_date'])
     daily_trades = daily_trades.drop_duplicates(['day', 'asset'], keep='last').set_index(['day', 'asset'])
     recorded_prices = _daily_frame(daily_trades.price_trade_ccy.unstack(), idx).reindex(columns=assets)
@@ -989,7 +1095,6 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     prices_used = market_prices.fillna(recorded_prices)
     unknown = (prices_used.isna() & positive).any()
 
-    # Align each market currency once, then gather its series for every asset using it.
     rates = _daily_frame(pd.DataFrame(fxs, dtype='float64'), idx).bfill()
     rates[base] = 1.0
     asset_rates = rates.reindex(columns=ccys).copy()
@@ -1006,7 +1111,6 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     estimated_assets = estimated.index[estimated].tolist()
     unknown_assets = unknown.index[unknown].tolist()
     warnings = []
-    # Original summation order and cent rounding are significant near half-cent boundaries.
     mat = np.ascontiguousarray(changes.to_numpy(dtype=float) *
                                np.nan_to_num(prices_used.to_numpy(dtype=float), nan=0) *
                                np.nan_to_num(asset_rates.to_numpy(dtype=float), nan=0))

@@ -1,11 +1,11 @@
 """Portfolio Track — FastAPI server for the mobile-first investment tracker."""
 from __future__ import annotations
 import csv
+from collections import OrderedDict
 from dataclasses import dataclass
-from functools import lru_cache
 from datetime import date,datetime,timedelta,timezone
 from io import StringIO
-import hashlib,base64,hmac,os,re,secrets
+import hashlib,base64,hmac,os,re,secrets,threading
 from pathlib import Path
 import uuid
 from fastapi import FastAPI,Request,Depends,HTTPException,UploadFile,File,Query
@@ -75,28 +75,41 @@ class Ledger:
     tickers: tuple[str, ...] | None = None
 
 
-@lru_cache(maxsize=6)
-def _cached_ledger(user: str, csv_text: str) -> Ledger:
-    return Ledger(engine.read_trades(csv_text))
+_ledger_lock = threading.Lock()
+_ledger_cache: OrderedDict[tuple[str, str], Ledger] = OrderedDict()
+
+
+def _store_ledger(user: str, csv_text: str, ledger: Ledger) -> None:
+    if len(csv_text) > 1_000_000:
+        return
+    key = (user, csv_text)
+    with _ledger_lock:
+        _ledger_cache[key] = ledger
+        _ledger_cache.move_to_end(key)
+        while len(_ledger_cache) > 8:
+            _ledger_cache.popitem(last=False)
 
 
 def ledger_for(p: Portfolio) -> Ledger:
-    # Keep the common dashboard/refresh/chart sequence from reparsing a CSV three times.
-    # Large imports remain usable without retaining several large frames between requests.
     if len(p.csv_text) > 1_000_000:
         return Ledger(engine.read_trades(p.csv_text))
-    return _cached_ledger(p.user_key, p.csv_text)
+    key = (p.user_key, p.csv_text)
+    with _ledger_lock:
+        hit = _ledger_cache.get(key)
+        if hit is not None:
+            _ledger_cache.move_to_end(key)
+            return hit
+    ledger = Ledger(engine.read_trades(p.csv_text))
+    _store_ledger(p.user_key, p.csv_text, ledger)
+    return ledger
 
 
 def data_for(p: Portfolio) -> pd.DataFrame:
-    # Trade editing and base-currency changes mutate their working frame.
     return ledger_for(p).trades.copy()
 
 
 def quote_tickers(ledger: Ledger) -> tuple[str, ...]:
     if ledger.tickers is None:
-        # FIFO matching determines remaining quantity even for unmatched historical sales.
-        # Unit price affects cost only. No derived columns or second cost-basis pass needed.
         trades = ledger.trades
         positions, _, _ = engine.fifo(trades, 'price_trade_ccy')
         symbols = set()
@@ -110,6 +123,7 @@ def quote_tickers(ledger: Ledger) -> tuple[str, ...]:
 def save_data(db:DBSession,p:Portfolio,d:pd.DataFrame):
     p.csv_text=engine.to_csv(d,True)
     touch(p);db.commit()
+    _store_ledger(p.user_key, p.csv_text, Ledger(d.copy()))
 
 
 def pw_hash(pw:str,salt:bytes)->str:
@@ -166,7 +180,6 @@ def login(data:Login,request:Request,db:DBSession=Depends(db_dep)):
 def logout(request:Request):
     _check_origin(request);request.session.clear();return {'ok':True}
 
-# Optional Google OIDC; enabled only when Google OAuth credentials are configured.
 @app.get('/auth/google')
 async def google_login(request:Request):
     client_id=os.getenv('GOOGLE_CLIENT_ID'); client_secret=os.getenv('GOOGLE_CLIENT_SECRET')
@@ -177,7 +190,6 @@ async def google_login(request:Request):
                    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
                    client_kwargs={'scope':'openid email profile'})
     callback=str(request.url_for('google_callback'))
-    # Reverse-proxy HTTPS scheme is inferred from X-Forwarded headers by uvicorn --proxy-headers.
     configured=os.getenv('PUBLIC_BASE_URL','').rstrip('/')
     if configured:callback=configured+'/auth/google/callback'
     return await oauth.google.authorize_redirect(request,callback)
@@ -212,8 +224,6 @@ def dashboard_payload(p: Portfolio, ledger: Ledger,
         fx, fxwarns = dict(preloaded_fx[0]), list(preloaded_fx[1])
     else:
         fx,fxwarns=market.spot_rates(ccys,p.base_currency) if ccys else ({},[])
-    # Outage fallback: use an *explicitly labeled* recorded transaction FX rate,
-    # never an arbitrary 1.0 for a cross-currency conversion.
     for ccy in ccys:
         if ccy not in fx:
             prev=d.loc[(d.trade_ccy==ccy)&(d.fx_to_base>0)].sort_values('trade_date')
@@ -232,7 +242,7 @@ def dashboard_payload(p: Portfolio, ledger: Ledger,
 @app.get('/api/dashboard')
 def dashboard(request: Request, user: str = Depends(session_user), db: DBSession = Depends(db_dep)):
     p = get_owned(user, db)
-    db.commit()  # Release the connection before calling the market providers.
+    db.commit()
     return dashboard_payload(p, ledger_for(p))
 
 
@@ -386,11 +396,11 @@ def settings(item:SettingsInput,request:Request,user:str=Depends(session_user),d
         if warnings or not np.isfinite(rates).all():
             raise HTTPException(503,'Cannot switch base currency: '+('; '.join(warnings) or 'FX missing'))
         d['fx_to_base']=rates
-        # last_price_base must be recalculated by dashboard's spot rates at read time;
-        # old currency-specific cache in CSV is not trusted after base switch.
         p.csv_text=engine.to_csv(d)
     p.base_currency=new_base
     touch(p);db.commit()
+    if not d.empty:
+        _store_ledger(p.user_key, p.csv_text, Ledger(d))
     return {'ok':True,'base_currency':new_base}
 
 @app.post('/api/refresh')
@@ -419,7 +429,6 @@ def refresh(request: Request, user: str = Depends(session_user), db: DBSession =
             trades['last_price_trade_ccy'] = trades.last_price_trade_ccy.astype(float).where(~changed, fresh)
             new_csv = engine.to_csv(trades)
             now_utc = datetime.now(timezone.utc)
-            # A quote fetched while a trade was edited must never overwrite the newer ledger.
             saved = db.execute(update(Portfolio).where(Portfolio.user_key == user, Portfolio.version == p.version)
                                .values(csv_text=new_csv, version=Portfolio.version + 1,
                                        updated_at=now_utc)
@@ -427,11 +436,11 @@ def refresh(request: Request, user: str = Depends(session_user), db: DBSession =
             db.commit()
             if saved.rowcount != 1:
                 raise HTTPException(409, 'Portfolio changed during refresh. Refresh again for current prices.')
-            # Reuse the updated in-memory frame instead of issuing an extra DB SELECT + CSV parse.
             p.csv_text = new_csv
             p.version += 1
             p.updated_at = now_utc
             active_ledger = Ledger(trades, tickers)
+            _store_ledger(user, new_csv, active_ledger)
     preloaded_fx = fx_future.result() if fx_future is not None else None
     if include_dashboard:
         dash = dashboard_payload(p, active_ledger, preloaded_fx=preloaded_fx)
@@ -441,10 +450,9 @@ def refresh(request: Request, user: str = Depends(session_user), db: DBSession =
             if known_history_revision and known_history_revision == rev:
                 reply['history_unchanged'] = True
             else:
-                try:
-                    hist = market.portfolio_history(active_ledger.trades, p.base_currency, span,
-                                                    revision=rev, owner=user)
-                    reply['history'] = {**hist, 'history_revision': rev}
-                except ValueError:
-                    pass
+                # Only attach history inline when already warm in RAM; never stall
+                # the price refresh waiting on uncached historical chart downloads.
+                cached_hist = market.peek_cached_history(span, revision=rev, owner=user)
+                if cached_hist is not None:
+                    reply['history'] = {**cached_hist, 'history_revision': rev}
     return reply
