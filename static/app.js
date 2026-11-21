@@ -666,7 +666,7 @@ function renderDashboard(){
   const holdings = sortedHomeHoldings(d.holdings);
   $('main-holdings').innerHTML=holdings.length?holdings.map(h=>{
     const pnlPct = h.invested ? 100*(h.pnl||0)/h.invested : 0;
-    return `<div class="holding-row home-holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">Qty ${state.hidden?'••••':quantityFmt(h.quantity)}</div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(pnlPct))}</span></div></div>`;
+    return `<div class="holding-row home-holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${state.hidden?'••••':quantityFmt(h.quantity)} shares</div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(pnlPct))}</span></div></div>`;
   }).join(''):emptyMessage('Nothing in your portfolio yet','Add a trade or upload your existing trades CSV.','trade');
   activatePendingLogoSearch($('main-holdings'));
 }
