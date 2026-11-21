@@ -6,8 +6,34 @@
   <meta name="theme-color" content="#090b0e">
   <meta name="description" content="Track your investments beautifully, in one place, privately.">
   <title>Track.</title>
-  <link rel="icon" type="image/png" href="/static/logos/logo.png">
+  <title>Track — All your investments, one place.</title>
+  <link id="app-favicon" rel="icon" type="image/png" href="/static/logos/logo.png">
   <link rel="apple-touch-icon" href="/static/logos/logo.png">
+  <script>
+    (() => {
+      const img = new Image();
+      img.onload = () => {
+        const size = 128;
+        const r = size * 0.22; // matches border-radius: 22% in logo.css
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.beginPath();
+        ctx.moveTo(r, 0);
+        ctx.arcTo(size, 0, size, size, r);
+        ctx.arcTo(size, size, 0, size, r);
+        ctx.arcTo(0, size, 0, 0, r);
+        ctx.arcTo(0, 0, size, 0, r);
+        ctx.closePath();
+        ctx.clip();
+        ctx.drawImage(img, 0, 0, size, size);
+        const link = document.getElementById('app-favicon');
+        if (link) link.href = canvas.toDataURL('image/png');
+      };
+      img.src = '/static/logos/logo.png';
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
