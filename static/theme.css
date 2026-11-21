@@ -90,7 +90,8 @@ h1, h2, h3, .top-brand, .total-value, .summary-strip strong, .section-heading h2
 h1, h2, h3, b, strong { color: inherit; }
 
 /* Tabular figures across all numeric UI elements */
-.total-value, .summary-strip strong, .holding-value, .holding-details b,
+.total-value, .summary-strip strong, .holding-value, .analytics-ltp, .analytics-meta-right,
+.analytics-metric strong, .analytics-pnl-pct, .analytics-pnl-val,
 .trade-amount, .tax-total strong, .tax-entry .tax-pnl, .trade-preview strong,
 .pnl-pill, .capital-share, .capital-value {
   font-variant-numeric: tabular-nums;
@@ -195,7 +196,7 @@ h1, h2, h3, b, strong { color: inherit; }
 .page-heading p:last-child { color: var(--subtle); font-size: 13.25px; margin: 6px 0 0; }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Home View: Hero Card + Summary Strip + Sortable Holdings Card
+   Home View: Hero Card + Summary Strip + Holdings Card with Sort Dropdown
    ───────────────────────────────────────────────────────────────────────── */
 .home-bento {
   display: flex;
@@ -220,7 +221,7 @@ h1, h2, h3, b, strong { color: inherit; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 .refresh-icon {
   display: inline-flex;
@@ -235,6 +236,8 @@ h1, h2, h3, b, strong { color: inherit; }
   color: var(--accent);
   font-size: 12.19px;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: background .16s ease, border-color .16s ease, transform .12s ease;
 }
 .refresh-icon svg { width: 15px; height: 15px; }
@@ -359,27 +362,12 @@ html[data-theme="light"] .range-row button.selected {
   gap: 16px;
 }
 .summary-card { min-width: 0; flex: 1; }
-.summary-label-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  margin-bottom: 6px;
-}
 .summary-strip span {
+  display: block;
   color: var(--subtle);
   font-size: 12.19px;
-  margin-bottom: 0;
+  margin-bottom: 6px;
 }
-.summary-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  display: none;
-}
-.dot-neutral { background: var(--subtle); opacity: .65; }
-.dot-accent { background: var(--positive); }
-.dot-muted { background: var(--accent); }
 .summary-strip strong {
   color: var(--text);
   font-size: 16px;
@@ -399,20 +387,98 @@ html[data-theme="light"] .range-row button.selected {
   padding: 18px 22px 8px;
 }
 .holdings-panel-head {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: space-between;
   gap: 10px;
 }
-.holdings-panel-head .eyebrow { margin: 0; }
-.holdings-controls {
+.section-title-group {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 8px;
 }
+.holdings-panel-head .eyebrow { margin: 0; display: inline-flex; align-items: center; gap: 6px; }
+
+/* Sort Dropdown Menu (3-line sort button next to asset count) */
+.sort-dropdown {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.sort-trigger {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--subtle);
+  display: grid;
+  place-items: center;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.sort-trigger svg { width: 16px; height: 16px; }
+.sort-trigger:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.sort-trigger[aria-expanded="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.sort-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.sort-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 146px;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .32);
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+html[data-theme="light"] .sort-menu {
+  box-shadow: 0 12px 28px rgba(15, 23, 42, .12);
+}
+.sort-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--subtle);
+  font-size: 12.72px;
+  font-weight: 550;
+  text-align: left;
+  transition: background .14s ease, color .14s ease;
+}
+.sort-option:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.sort-option.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 650;
+}
+.sort-check { opacity: 0; font-size: 12px; }
+.sort-option.active .sort-check { opacity: 1; }
+
+/* Reusable segmented filter pills (used in Trade History) */
 .sort-pills {
   display: inline-flex;
   align-items: center;
@@ -458,6 +524,7 @@ html[data-theme="light"] .sort-pill.active {
   font-weight: 600;
   padding: 4px 9px;
   border-radius: 100px;
+  margin-left: 0;
 }
 .text-link {
   color: var(--accent);
@@ -468,21 +535,16 @@ html[data-theme="light"] .sort-pill.active {
 }
 .text-link:hover { opacity: .8; }
 
-/* Holding Rows */
+/* Holding Rows (Home) */
 .holding-row, .analytics-entry, .trade-row, .tax-entry { border-color: var(--border); }
 .holding-row {
   gap: 12px;
-  padding: 13px 8px;
-  margin: 0 -8px;
-  border-radius: 13px;
+  padding: 13px 2px;
   border-bottom: 1px solid var(--border);
-  transition: background .14s ease;
 }
 .holdings-panel .holding-row:last-child { border-bottom: 0; }
 .holdings-panel .holding-row:first-child { padding-top: 13px; }
-.home-holding-row { cursor: pointer; }
-.home-holding-row:hover { background: var(--surface-2); }
-.home-holding-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.home-holding-row { cursor: default; }
 
 .holding-name, .holding-value strong {
   color: var(--text);
@@ -495,46 +557,8 @@ html[data-theme="light"] .sort-pill.active {
   font-size: 12.19px;
   font-weight: 500;
 }
-.holding-weight { opacity: .78; }
 .holding-value span, .tax-entry .tax-pnl { color: var(--positive); font-weight: 600; }
 .holding-value span.negative, .tax-entry .tax-pnl.negative, .negative { color: var(--negative) !important; }
-
-.row-chevron {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  color: var(--subtle);
-  opacity: .55;
-  flex-shrink: 0;
-  transition: transform .18s ease, opacity .18s ease, color .18s ease;
-}
-.row-chevron svg { width: 15px; height: 15px; }
-.home-holding-row:hover .row-chevron { opacity: .95; }
-.home-holding-row.is-expanded .row-chevron {
-  transform: rotate(90deg);
-  color: var(--accent);
-  opacity: 1;
-}
-
-.home-holding-prices {
-  white-space: normal;
-  overflow: visible;
-  overflow-wrap: anywhere;
-  margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 9px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-}
-.home-holding-row:hover .home-holding-prices { background: var(--panel-hover); }
-.home-holding-prices > div { margin: 0; }
-.home-holding-prices span { color: var(--subtle); }
-.home-holding-prices b { color: var(--text); font-weight: 600; }
-.home-holding-prices[hidden] { display: none; }
 
 /* Asset logos: unchanged initial/fallback icon; show the image only on success. */
 .asset-icon {
@@ -585,7 +609,7 @@ html[data-theme="light"] .asset-icon.has-logo { filter: none; }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Analytics View — Preserved Capital Treemap + Upgraded Detailed Cards
+   Analytics View — Preserved Capital Treemap + Borderless Detailed List
    ───────────────────────────────────────────────────────────────────────── */
 .section-card {
   background: var(--surface);
@@ -701,62 +725,104 @@ html[data-theme="light"] .asset-icon.has-logo { filter: none; }
 .capital-tile.is-focused .capital-share { font-size: 14px; line-height: 1.2; }
 .capital-transition-overlay { pointer-events: none; }
 
-/* Detailed Analytics Cards */
-.analytics-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
+/* Single-Column Borderless Detailed View List (clean thin dividers, no boxes) */
+.analytics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 .analytics-entry {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  box-shadow: var(--card-shadow);
-  padding: 16px 18px;
-  transition: border-color .16s ease;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 2px;
 }
-.analytics-entry:hover { border-color: var(--border-strong); }
-.analytics-entry .holding-row {
-  border-bottom: 0;
-  padding: 0 0 12px;
-  margin: 0;
+.analytics-entry:first-child { padding-top: 8px; }
+.analytics-entry:last-child { border-bottom: 0; }
+
+.analytics-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
-.holding-details {
+.analytics-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+.analytics-title-group {
+  min-width: 0;
+  flex: 1;
+}
+.analytics-ltp {
+  font-size: 12.19px;
+  font-weight: 500;
   color: var(--subtle);
-  font-size: 12.72px;
-  margin-top: 2px;
+  margin-top: 3px;
+}
+.analytics-meta-right {
+  text-align: right;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--subtle);
+  font-size: 12.19px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+.analytics-meta-right > div + div { margin-top: 3px; }
+
+.analytics-row-metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
+  align-items: end;
+  margin-top: 14px;
 }
-.holding-details > div {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  padding: 9px 11px;
-  min-width: 0;
-}
-.holding-details span {
+.analytics-metric { min-width: 0; }
+.analytics-metric span {
   display: block;
   font-size: 11.66px;
+  font-weight: 500;
   color: var(--subtle);
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.holding-details b {
-  color: var(--text);
-  font-weight: 600;
+.analytics-metric strong {
   display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.analytics-metric-mid { text-align: center; }
+.analytics-metric-end { text-align: right; }
+.analytics-metric .analytics-pnl-pct {
+  color: var(--positive);
+  font-size: 12.19px;
+  font-weight: 600;
+}
+.analytics-metric .analytics-pnl-val {
+  color: var(--positive);
+  font-weight: 650;
+}
+.analytics-metric .analytics-pnl-pct.negative,
+.analytics-metric .analytics-pnl-val.negative {
+  color: var(--negative);
+}
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Forms, New Trade & Edit Dialog
+   Forms, New Trade (Full Tab Width) & Edit Dialog
    ───────────────────────────────────────────────────────────────────────── */
-.form-card { max-width: 760px; padding: 26px; }
+.form-card { width: 100%; max-width: none; padding: 26px; }
 label, .auth-panel label {
   color: var(--subtle);
   font-size: 12.72px;
@@ -938,7 +1004,7 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
 .trade-amount strong { font-size: 13px; font-weight: 650; }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Tax / Realized P/L View
+   Tax / Realized P/L View — Single Column, Thin Dividers Only (No Row Boxes)
    ───────────────────────────────────────────────────────────────────────── */
 .tax-card { padding: 24px; }
 .tax-total {
@@ -951,24 +1017,27 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
 .tax-total strong.negative { color: var(--negative); }
 .tax-total small { color: var(--subtle); font-size: 12.19px; }
 
-.tax-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
+.tax-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
 }
 .tax-entry {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: var(--card-shadow);
-  padding: 15px 18px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  border-bottom: 1px solid var(--border);
+  padding: 15px 2px;
 }
+.tax-entry:first-child { padding-top: 8px; }
+.tax-entry:last-child { border-bottom: 0; }
 .tax-entry strong { font-size: 13.5px; font-weight: 650; }
 .tax-entry small { color: var(--subtle); font-size: 12.19px; margin-top: 6px; }
 .footnote { color: var(--subtle); font-size: 12.19px; }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Account View
+   Account View — Stacked on Mobile; Full-Width Preferences + 2-Col Bottom on Desktop
    ───────────────────────────────────────────────────────────────────────── */
 .profile-box {
   background: var(--surface);
@@ -994,9 +1063,10 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   font-size: 11.66px;
   padding: 6px 10px;
 }
-.account-grid {
-  display: grid;
-  grid-template-columns: 1fr;
+.account-grid,
+.account-bottom-row {
+  display: flex;
+  flex-direction: column;
   gap: 0;
 }
 .settings-box {
@@ -1302,22 +1372,33 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
     flex-direction: column;
     justify-content: center;
   }
-  .summary-dot { display: inline-block; }
-  .summary-strip strong { font-size: 20px; margin-top: 4px; }
+  .summary-strip strong { font-size: 20px; margin-top: 2px; }
 
   .page-heading { padding: 4px 0 22px; }
-  .analytics-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
-  }
-  .tax-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-  }
+
+  /* Symmetric Account Layout on Desktop: Full-width Preferences + 2 equal cards below */
   .account-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 22px;
+  }
+  .account-section-wide {
+    width: 100%;
+    margin-bottom: 0;
+  }
+  .account-bottom-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 20px;
-    align-items: start;
+    align-items: stretch;
+  }
+  .account-bottom-row > .account-section {
+    margin-bottom: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .account-bottom-row .settings-box {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
   }
 }
 
@@ -1335,20 +1416,27 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
     margin: 0;
     padding: 20px 18px 14px;
   }
-  .refresh-label { display: none; }
-  .refresh-icon { width: 34px; height: 34px; padding: 0; justify-content: center; }
+  .refresh-icon {
+    height: 32px;
+    padding: 0 11px;
+    gap: 5px;
+    font-size: 11.66px;
+  }
+  .refresh-icon svg { width: 14px; height: 14px; }
   .chart-section { margin: 8px -12px 4px; }
   .history-chart { height: 235px; }
   .range-row button { padding: 9px 2px; }
 
   .summary-strip { padding: 15px 14px; gap: 10px; border-radius: 16px; }
   .holdings-panel { padding: 15px 14px 6px; border-radius: 18px; }
-  .holdings-panel-head { flex-direction: column; align-items: stretch; gap: 10px; }
-  .holdings-controls { justify-content: space-between; }
 
-  .holding-name, .holding-value strong { font-size: 13.5px; }
-  .holding-subtitle, .holding-value span { font-size: 11.66px; }
-  .home-holding-prices { flex-direction: column; gap: 4px; }
+  .holding-name, .holding-value strong,
+  .analytics-metric strong { font-size: 13.5px; }
+  .holding-subtitle, .holding-value span,
+  .analytics-ltp, .analytics-meta-right,
+  .analytics-metric .analytics-pnl-pct { font-size: 11.66px; }
+  .analytics-metric span { font-size: 11.13px; }
+  .analytics-entry { padding: 14px 2px; }
 
   .page-heading { padding: 20px 0 16px; }
   .page-heading h1 { font-size: 30px; }
@@ -1358,9 +1446,6 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .capital-meta, .capital-reset { font-size: 11.66px; }
   .capital-header h2 { font-size: 19px; }
 
-  .analytics-entry { padding: 14px; border-radius: 16px; }
-  .holding-details { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-  .holding-details span { font-size: 11.13px; }
   .form-card { padding: 18px; }
   .trades-surface { padding: 4px 10px; border-radius: 16px; }
   .tax-card { padding: 18px; }
@@ -1398,15 +1483,18 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .capital-tile.is-focused .capital-name { font-size: 17px; }
   .holding-row { gap: 10px; }
   .asset-icon { width: 41px; height: 41px; flex-basis: 41px; border-radius: 12px; }
+  .analytics-row-metrics { gap: 6px; }
+  .analytics-metric strong { font-size: 12.8px; }
   .sort-pill { padding: 5px 8px; }
 }
 
 @media (max-width: 365px) {
   .setting-row { padding: 14px 12px; }
   .theme-switch button { padding: 6px 8px; }
+  .refresh-icon { padding: 0 9px; font-size: 11px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .asset-logo-image { transition: none; }
-  .capital-tile, .row-chevron { transition: none !important; }
+  .capital-tile { transition: none !important; }
 }

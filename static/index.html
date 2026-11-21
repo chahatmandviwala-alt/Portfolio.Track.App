@@ -9,8 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css?v=16">
-  <link rel="stylesheet" href="/static/theme.css?v=16">
+  <link rel="stylesheet" href="/static/styles.css?v=17">
+  <link rel="stylesheet" href="/static/theme.css?v=17">
   <link rel="stylesheet" href="/static/logo.css?v=2">
   <script>
     // Keep the mobile browser's theme color in sync with the user's appearance setting.
@@ -73,7 +73,7 @@
     });
   </script>
   <script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-  <script defer src="/static/app.js?v=16"></script>
+  <script defer src="/static/app.js?v=17"></script>
 </head>
 <body>
   <div class="ambient ambient-left"></div><div class="ambient ambient-right"></div>
@@ -159,26 +159,17 @@
 
             <div class="summary-strip" aria-label="Portfolio key metrics">
               <div class="summary-card">
-                <div class="summary-label-row">
-                  <span>Invested</span>
-                  <span class="summary-dot dot-neutral" aria-hidden="true"></span>
-                </div>
+                <span>Invested</span>
                 <strong id="invested-value">—</strong>
               </div>
               <div class="summary-divider"></div>
               <div class="summary-card">
-                <div class="summary-label-row">
-                  <span>Unrealized P/L</span>
-                  <span class="summary-dot dot-accent" aria-hidden="true"></span>
-                </div>
+                <span>Unrealized P/L</span>
                 <strong id="unrealized-value">—</strong>
               </div>
               <div class="summary-divider"></div>
               <div class="summary-card">
-                <div class="summary-label-row">
-                  <span>Holdings</span>
-                  <span class="summary-dot dot-muted" aria-hidden="true"></span>
-                </div>
+                <span>Holdings</span>
                 <strong id="holdings-count">—</strong>
               </div>
             </div>
@@ -188,15 +179,18 @@
             <div class="section-heading holdings-panel-head">
               <div class="section-title-group">
                 <p class="eyebrow">ASSETS <span class="section-count" id="holdings-badge">0</span></p>
-              </div>
-              <div class="holdings-controls">
-                <div class="sort-pills" role="group" aria-label="Sort assets">
-                  <button type="button" class="sort-pill active" data-sort="value">Value</button>
-                  <button type="button" class="sort-pill" data-sort="pnl">P/L %</button>
-                  <button type="button" class="sort-pill" data-sort="name">Name</button>
+                <div class="sort-dropdown" id="home-sort-dropdown">
+                  <button id="home-sort-btn" type="button" class="sort-trigger" aria-haspopup="menu" aria-expanded="false" aria-label="Sort assets" title="Sort assets">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+                  </button>
+                  <div id="home-sort-menu" class="sort-menu hidden" role="menu" aria-label="Sort assets by">
+                    <button type="button" class="sort-option active" role="menuitemradio" aria-checked="true" data-sort="value"><span>Value</span><span class="sort-check" aria-hidden="true">✓</span></button>
+                    <button type="button" class="sort-option" role="menuitemradio" aria-checked="false" data-sort="pnl"><span>P/L %</span><span class="sort-check" aria-hidden="true">✓</span></button>
+                    <button type="button" class="sort-option" role="menuitemradio" aria-checked="false" data-sort="name"><span>Name</span><span class="sort-check" aria-hidden="true">✓</span></button>
+                  </div>
                 </div>
-                <button class="text-link" data-tab="analytics">See all →</button>
               </div>
+              <button class="text-link" data-tab="analytics">See all →</button>
             </div>
             <div id="main-holdings" class="holdings-list"></div>
           </div>
@@ -213,7 +207,7 @@
             <div class="capital-meta"><span id="capital-scope">Market value in base currency</span><span id="capital-hint">Select a tile to expand</span></div>
           </div>
           <div class="section-heading analytics-heading"><div><p class="eyebrow">DETAILED VIEW</p></div><span id="analytics-n" class="hint-tag"></span></div>
-          <div class="holdings-list analytics-grid" id="analytics-holdings"></div>
+          <div class="holdings-list analytics-list" id="analytics-holdings"></div>
         </section>
 
         <section id="view-trade" class="view" aria-label="Add a trade">
@@ -278,7 +272,7 @@
             <button id="tax-export" class="outline-btn full" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m-5-5 5 5 5-5M4 17v3h16v-3"/></svg>Export realized P/L CSV</button>
           </div>
           <div class="section-heading"><div><p class="eyebrow">CLOSED POSITIONS</p></div><span id="tax-count" class="hint-tag"></span></div>
-          <div id="tax-list" class="holdings-list tax-grid"></div>
+          <div id="tax-list" class="holdings-list tax-list"></div>
           <p id="tax-note" class="footnote">FIFO calculations are informational and not tax advice.</p>
         </section>
 
@@ -286,7 +280,7 @@
           <div class="page-heading"><h1>Your <em>account.</em></h1></div>
           <div class="profile-box"><div class="profile-avatar" id="profile-avatar">U</div><div><strong id="profile-name">Investor</strong><span id="profile-type">Private account</span></div><span class="secure-pill">● Secure</span></div>
           <div class="account-grid">
-            <div class="account-section">
+            <div class="account-section account-section-wide">
               <p class="eyebrow">PREFERENCES</p>
               <div class="settings-box">
                 <div class="setting-row"><div><strong>Base currency</strong><small>Value and performance in your currency</small></div><select id="base-select" aria-label="Base currency"><option>SEK</option><option>USD</option><option>EUR</option><option>INR</option><option>GBP</option><option>CHF</option><option>CAD</option><option>NOK</option><option>AUD</option><option>JPY</option><option>DKK</option><option>GBX</option></select></div>
@@ -294,7 +288,7 @@
                 <div class="setting-row"><div><strong>Hide sensitive values</strong><small>Conceal amounts across the app</small></div><label class="toggle-compact"><input id="account-privacy" type="checkbox"><span class="switch"></span></label></div>
               </div>
             </div>
-            <div class="account-col-stack">
+            <div class="account-bottom-row">
               <div class="account-section">
                 <p class="eyebrow">YOUR DATA</p>
                 <div class="settings-box">

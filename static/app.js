@@ -9,8 +9,6 @@ const state = {
   theme:localStorage.getItem('track-theme')==='light'?'light':'dark',
   tradeLimit:55, editId:null, lastTax:null, busy:false
 };
-// Preserve the home list's expanded rows when the dashboard is re-rendered.
-const expandedHomeHoldings = new Set();
 // Deduplicate concurrent or hovered history fetches for the same (revision, span).
 const inFlightHistory = new Map();
 const icons = { Stock:'S', Fund:'F', ETF:'E', Crypto:'₿' };
@@ -38,6 +36,11 @@ function quantityFmt(n){return new Intl.NumberFormat('en-US',{maximumFractionDig
 function fmt(v,ccy=state.dashboard?.base_currency ?? state.user?.base_currency ?? 'SEK',digits=0){
   if(v==null)return '—';if(state.hidden)return '••••••';
   const value=compact(v,digits);return ccy==='SEK' ? `${value} kr` : ccy==='INR'?`₹${value}`: ccy==='USD'?`$${value}`:ccy==='EUR'?`€${value}`:ccy==='GBP'?`£${value}`:`${value} ${ccy}`;
+}
+function signedFmt(v,ccy=state.dashboard?.base_currency ?? state.user?.base_currency ?? 'SEK',digits=2){
+  if(v==null)return '—';if(state.hidden)return '••••••';
+  const n=Number(v)||0;
+  return `${n<0?'-':'+'}${fmt(Math.abs(n),ccy,digits)}`;
 }
 function signedPct(n){return state.hidden?'••••':`${Number(n)>=0?'+':''}${compact(n,2)}%`;}
 function toast(message,isError=false){const el=$('toast');el.textContent=message;el.className='toast show'+(isError?' error':'');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),4200);}
@@ -92,8 +95,14 @@ function toggleHidden(value){
 }
 function showAuth(){ $('loader').classList.add('hidden');$('app').classList.add('hidden');$('auth').classList.remove('hidden'); }
 function showApp(){ $('loader').classList.add('hidden');$('auth').classList.add('hidden');$('app').classList.remove('hidden'); }
+function closeSortMenu(){
+  const menu=$('home-sort-menu'), btn=$('home-sort-btn');
+  if(menu) menu.classList.add('hidden');
+  if(btn) btn.setAttribute('aria-expanded','false');
+}
 function nav(tab){
   if(!state.user)return;
+  closeSortMenu();
   state.view=tab;
   document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id==='view-'+tab));
   document.querySelectorAll('.nav-btn').forEach(btn=>{
@@ -656,29 +665,22 @@ function renderDashboard(){
   $('holdings-badge').textContent=d.holdings.length;
   const holdings = sortedHomeHoldings(d.holdings);
   $('main-holdings').innerHTML=holdings.length?holdings.map(h=>{
-    const key=JSON.stringify([h.asset,h.currency,h.type]);
-    const expanded=expandedHomeHoldings.has(key);
     const pnlPct = h.invested ? 100*(h.pnl||0)/h.invested : 0;
-    const shareText = state.hidden ? '••••' : compact(h.share,1)+'%';
-    return `<div class="holding-row home-holding-row ${expanded?'is-expanded':''}" role="button" tabindex="0" aria-expanded="${expanded}" data-holding-key="${html(key)}">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${state.hidden?'••••':quantityFmt(h.quantity)} ${h.type==='Crypto'?'units':'shares'} <span class="holding-weight">· ${html(shareText)}</span></div><div class="holding-subtitle home-holding-prices" ${expanded?'':'hidden'}><div><span>Last Price:</span> <b>${html(fmt(h.ltp,h.currency,2))}</b></div><div><span>Avg Price:</span> <b>${html(fmt(h.avg,h.currency,2))}</b></div></div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(pnlPct))}</span></div><span class="row-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span></div>`;
+    return `<div class="holding-row home-holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">Qty ${state.hidden?'••••':quantityFmt(h.quantity)}</div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(pnlPct))}</span></div></div>`;
   }).join(''):emptyMessage('Nothing in your portfolio yet','Add a trade or upload your existing trades CSV.','trade');
   activatePendingLogoSearch($('main-holdings'));
-}
-function toggleHomeHolding(row){
-  const expanded=row.getAttribute('aria-expanded')!=='true';
-  row.setAttribute('aria-expanded',String(expanded));
-  row.classList.toggle('is-expanded',expanded);
-  row.querySelector('.home-holding-prices').hidden=!expanded;
-  if(expanded)expandedHomeHoldings.add(row.dataset.holdingKey);
-  else expandedHomeHoldings.delete(row.dataset.holdingKey);
 }
 function emptyMessage(title,desc,action){return `<div class="empty"><strong>${html(title)}</strong>${html(desc)}${action?`<button type="button" data-go="${action}">Get started →</button>`:''}</div>`;}
 function renderAnalytics(){
   const d=state.dashboard;if(!d)return;
   $('analytics-n').textContent=`${d.holdings.length} assets`;
-  $('analytics-holdings').innerHTML=d.holdings.length?d.holdings.map(h=>
-    `<div class="analytics-entry"><div class="holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${html(h.ticker||h.type)} · ${html(h.currency)}</div></div><div class="holding-value"><strong>${html(fmt(h.value_trade,h.currency,2))}</strong><span class="${h.pnl_trade<0?'negative':''}">${html(fmt(h.pnl_trade,h.currency,2))}</span></div></div><div class="holding-details"><div><span>Quantity</span><b>${state.hidden?'••••':quantityFmt(h.quantity)}</b></div><div><span>Last price (${html(h.currency)})</span><b>${html(fmt(h.ltp,h.currency,2))}</b></div><div><span>Avg price (${html(h.currency)})</span><b>${html(fmt(h.avg,h.currency,2))}</b></div><div><span>Unrealized P/L (${html(h.currency)})</span><b class="${h.pnl_trade<0?'negative':''}">${html(fmt(h.pnl_trade,h.currency,2))}</b></div><div><span>Portfolio share</span><b>${state.hidden?'••••':compact(h.share,2)+'%'}</b></div><div><span>P/L (%)</span><b class="${h.pnl_trade<0?'negative':''}">${html(signedPct(h.pnl_trade_pct))}</b></div></div></div>`
-  ).join(''):emptyMessage('No investments found','Your holdings appear here after you add trades.','trade');
+  $('analytics-holdings').innerHTML=d.holdings.length?d.holdings.map(h=>{
+    const neg = (Number(h.pnl_trade) || 0) < 0;
+    const pctText = state.hidden
+      ? '(••••)'
+      : `(${neg?'▼':'▲'}${compact(Math.abs(Number(h.pnl_trade_pct)||0),2)}%)`;
+    return `<div class="analytics-entry"><div class="analytics-row-top"><div class="analytics-identity">${logo(h)}<div class="analytics-title-group"><div class="holding-name">${html(h.asset)}</div><div class="analytics-ltp">${html(fmt(h.ltp,h.currency,2))}</div></div></div><div class="analytics-meta-right"><div>Avg. ${html(fmt(h.avg,h.currency,2))}</div><div>Qty ${state.hidden?'••••':quantityFmt(h.quantity)}</div></div></div><div class="analytics-row-metrics"><div class="analytics-metric"><span>Invested Value</span><strong>${html(fmt(h.invested_trade,h.currency,2))}</strong></div><div class="analytics-metric analytics-metric-mid"><span>Current Value</span><strong>${html(fmt(h.value_trade,h.currency,2))}</strong></div><div class="analytics-metric analytics-metric-end"><span class="analytics-pnl-pct ${neg?'negative':''}">${html(pctText)}</span><strong class="analytics-pnl-val ${neg?'negative':''}">${html(signedFmt(h.pnl_trade,h.currency,2))}</strong></div></div></div>`;
+  }).join(''):emptyMessage('No investments found','Your holdings appear here after you add trades.','trade');
   activatePendingLogoSearch($('analytics-holdings'));
   renderCapitalChart();
 }
@@ -911,15 +913,15 @@ function prefetchRange(span){
   fetchHistorySpan(span).catch(()=>{});
 }
 
-async function loadRange(span){
+async function loadRange(span, silent=false){
   state.historyRange=span;
   document.querySelectorAll('[data-range]').forEach(el=>el.classList.toggle('selected',el.dataset.range===span));
   if(state.history[span]){renderChart(state.history[span]);return;}
-  $('history-loading').classList.remove('hidden');
+  if(!silent) $('history-loading').classList.remove('hidden');
   try{
     const data=await fetchHistorySpan(span);
     if(state.historyRange===span)renderChart(data);
-  }catch(e){toast('Portfolio history: '+e.message,true);}
+  }catch(e){if(!silent)toast('Portfolio history: '+e.message,true);}
   finally{if(state.historyRange===span)$('history-loading').classList.add('hidden');}
 }
 
@@ -929,6 +931,7 @@ function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false){
   const nextRev = d.history_revision || null;
   const baseChanged = !!(prevBase && prevBase !== d.base_currency);
   const revChanged = !!(prevRev && nextRev && prevRev !== nextRev);
+  const hadChart = !!state.history[state.historyRange];
   if(baseChanged || revChanged){
     state.history = {};
     inFlightHistory.clear();
@@ -948,11 +951,12 @@ function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false){
     return;
   }
   if(historyUnchanged && state.history[state.historyRange]){
-    // Revision matched: chart data is already fresh—skip network request & spinner.
     if(state.view === 'home') renderChart(state.history[state.historyRange]);
     return;
   }
-  if(state.view === 'home') loadRange(state.historyRange);
+  // If a chart is already rendered and only NSE official close metadata updated,
+  // refresh the chart silently in the background without blanking or blocking UI.
+  if(state.view === 'home') loadRange(state.historyRange, hadChart && !baseChanged);
 }
 
 async function reloadDashboard(showMessage=false){
@@ -1110,31 +1114,41 @@ function bindEvents(){
       el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();nav(el.dataset.tab);}});
     }
   });
-  document.addEventListener('click',e=>{const target=e.target.closest('[data-go]');if(target)nav(target.dataset.go);});
+  document.addEventListener('click',e=>{
+    const target=e.target.closest('[data-go]');
+    if(target)nav(target.dataset.go);
+    if(!e.target.closest('#home-sort-dropdown')) closeSortMenu();
+  });
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape') closeSortMenu();
+  });
+  $('home-sort-btn')?.addEventListener('click',e=>{
+    e.stopPropagation();
+    const menu=$('home-sort-menu');
+    const opening=menu.classList.contains('hidden');
+    menu.classList.toggle('hidden',!opening);
+    e.currentTarget.setAttribute('aria-expanded',String(opening));
+  });
+  document.querySelectorAll('#home-sort-menu [data-sort]').forEach(el=>el.addEventListener('click',()=>{
+    state.homeSort = el.dataset.sort;
+    document.querySelectorAll('#home-sort-menu [data-sort]').forEach(b=>{
+      const active=b===el;
+      b.classList.toggle('active',active);
+      b.setAttribute('aria-checked',String(active));
+    });
+    closeSortMenu();
+    renderDashboard();
+  }));
   document.querySelectorAll('[data-range]').forEach(el=>{
     el.addEventListener('click',()=>loadRange(el.dataset.range));
     el.addEventListener('pointerenter',()=>{ if(window.matchMedia('(hover: hover)').matches) prefetchRange(el.dataset.range); });
   });
-  document.querySelectorAll('[data-sort]').forEach(el=>el.addEventListener('click',()=>{
-    state.homeSort = el.dataset.sort;
-    document.querySelectorAll('[data-sort]').forEach(b=>b.classList.toggle('active',b===el));
-    renderDashboard();
-  }));
   document.querySelectorAll('[data-side-filter]').forEach(el=>el.addEventListener('click',()=>{
     state.sideFilter = el.dataset.sideFilter;
     state.tradeLimit = 55;
     document.querySelectorAll('[data-side-filter]').forEach(b=>b.classList.toggle('active',b===el));
     renderTrades();
   }));
-  $('main-holdings').addEventListener('click',e=>{
-    const row=e.target.closest('.home-holding-row');
-    if(row)toggleHomeHolding(row);
-  });
-  $('main-holdings').addEventListener('keydown',e=>{
-    if(e.key!=='Enter'&&e.key!==' ')return;
-    const row=e.target.closest('.home-holding-row');
-    if(row){e.preventDefault();toggleHomeHolding(row);}
-  });
   $('refresh-btn').addEventListener('click',refreshPortfolio);
   $('capital-reset').addEventListener('click',()=>{state.capitalFocus=null;renderCapitalChart(true);});
   $('capital-chart').addEventListener('click',e=>{
@@ -1179,7 +1193,7 @@ function bindEvents(){
   $('base-select').addEventListener('change',changeBase);
   $('file-export').addEventListener('click',()=>{window.location.href='/api/export/trades';});
   $('file-import').addEventListener('change',importFile);
-  $('logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});state.user=null;state.dashboard=null;state.trades=[];state.history={};state.historyRevision=null;inFlightHistory.clear();expandedHomeHoldings.clear();showAuth();toast('Signed out');}catch(e){toast(e.message,true);}});
+  $('logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});state.user=null;state.dashboard=null;state.trades=[];state.history={};state.historyRevision=null;inFlightHistory.clear();showAuth();toast('Signed out');}catch(e){toast(e.message,true);}});
   window.addEventListener('resize',()=>{state.chart?.resize();fitCapitalTileLabels($('capital-chart'));});
 }
 
@@ -1188,7 +1202,6 @@ async function startLoggedIn(prefetchedAccount=null){
   state.user=account;
   if(!state.user.authenticated){showAuth();return;}
   renderAccount();showApp();nav('home');
-  // Fetch dashboard and initial 1M history concurrently instead of serially.
   $('history-loading').classList.remove('hidden');
   const dashReq = api('/api/dashboard');
   const histReq = fetchHistorySpan(state.historyRange).catch(err=>{
