@@ -12,6 +12,7 @@ from fastapi import FastAPI,Request,Depends,HTTPException,UploadFile,File,Query
 from fastapi.responses import HTMLResponse,JSONResponse,StreamingResponse,RedirectResponse,FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel,Field
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import update
 from sqlalchemy.orm import Session as DBSession
@@ -26,6 +27,7 @@ from storage import Session,User,Portfolio,init_db,get_portfolio,touch
 BASE=Path(__file__).parent
 SESSION_SECRET=os.getenv('SESSION_SECRET','local-dev-only-not-for-production-change-this')
 app=FastAPI(title='Track portfolio API',docs_url=None,redoc_url=None)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
                    same_site='lax',https_only=os.getenv('APP_ENV')=='production',max_age=60*60*24*14)
 app.mount('/static',StaticFiles(directory=str(BASE/'static')),name='static')
@@ -202,10 +204,14 @@ async def google_callback(request:Request,db:DBSession=Depends(db_dep)):
     request.session.clear();request.session['user']=key
     return RedirectResponse('/',status_code=303)
 
-def dashboard_payload(p: Portfolio, ledger: Ledger) -> dict:
+def dashboard_payload(p: Portfolio, ledger: Ledger,
+                      preloaded_fx: tuple[dict[str, float], list[str]] | None = None) -> dict:
     d = ledger.trades
     ccys=d.trade_ccy.unique().tolist() if not d.empty else []
-    fx,fxwarns=market.spot_rates(ccys,p.base_currency) if ccys else ({},[])
+    if preloaded_fx is not None:
+        fx, fxwarns = dict(preloaded_fx[0]), list(preloaded_fx[1])
+    else:
+        fx,fxwarns=market.spot_rates(ccys,p.base_currency) if ccys else ({},[])
     # Outage fallback: use an *explicitly labeled* recorded transaction FX rate,
     # never an arbitrary 1.0 for a cross-currency conversion.
     for ccy in ccys:
@@ -389,15 +395,21 @@ def settings(item:SettingsInput,request:Request,user:str=Depends(session_user),d
 
 @app.post('/api/refresh')
 def refresh(request: Request, user: str = Depends(session_user), db: DBSession = Depends(db_dep),
-            include_dashboard: bool = False):
+            include_dashboard: bool = False, include_history: bool = False,
+            span: str = Query('1M'), known_history_revision: str = Query('')):
     _check_origin(request)
     p = get_owned(user, db)
     db.commit()
     ledger = ledger_for(p)
     tickers = quote_tickers(ledger)
+    # Overlap spot FX lookup with quote fetching when the caller also wants the dashboard.
+    ccys = ledger.trades.trade_ccy.unique().tolist() if (include_dashboard and not ledger.trades.empty) else []
+    fx_future = (market._coord_pool.submit(market.spot_rates, ccys, p.base_currency)
+                 if (include_dashboard and ccys) else None)
     quotes, errors = market.get_latest_prices(list(tickers)) if tickers else ({}, {})
     reply = {'updated': len(quotes), 'requested': len(tickers), 'errors': errors,
              'quotes': {t: {'source': q['source'], 'as_of': q['as_of']} for t, q in quotes.items()}}
+    active_ledger = ledger
     if quotes:
         trades = ledger.trades
         fresh = trades.ticker.map({t: q['price'] for t, q in quotes.items()})
@@ -405,16 +417,34 @@ def refresh(request: Request, user: str = Depends(session_user), db: DBSession =
         if changed.any():
             trades = trades.copy()
             trades['last_price_trade_ccy'] = trades.last_price_trade_ccy.astype(float).where(~changed, fresh)
+            new_csv = engine.to_csv(trades)
+            now_utc = datetime.now(timezone.utc)
             # A quote fetched while a trade was edited must never overwrite the newer ledger.
             saved = db.execute(update(Portfolio).where(Portfolio.user_key == user, Portfolio.version == p.version)
-                               .values(csv_text=engine.to_csv(trades), version=Portfolio.version + 1,
-                                       updated_at=datetime.now(timezone.utc))
+                               .values(csv_text=new_csv, version=Portfolio.version + 1,
+                                       updated_at=now_utc)
                                .execution_options(synchronize_session=False))
             db.commit()
             if saved.rowcount != 1:
                 raise HTTPException(409, 'Portfolio changed during refresh. Refresh again for current prices.')
+            # Reuse the updated in-memory frame instead of issuing an extra DB SELECT + CSV parse.
+            p.csv_text = new_csv
+            p.version += 1
+            p.updated_at = now_utc
+            active_ledger = Ledger(trades, tickers)
+    preloaded_fx = fx_future.result() if fx_future is not None else None
     if include_dashboard:
-        db.refresh(p)
-        db.commit()
-        reply['dashboard'] = dashboard_payload(p, ledger_for(p))
+        dash = dashboard_payload(p, active_ledger, preloaded_fx=preloaded_fx)
+        reply['dashboard'] = dash
+        if include_history:
+            rev = dash['history_revision']
+            if known_history_revision and known_history_revision == rev:
+                reply['history_unchanged'] = True
+            else:
+                try:
+                    hist = market.portfolio_history(active_ledger.trades, p.base_currency, span,
+                                                    revision=rev, owner=user)
+                    reply['history'] = {**hist, 'history_revision': rev}
+                except ValueError:
+                    pass
     return reply
