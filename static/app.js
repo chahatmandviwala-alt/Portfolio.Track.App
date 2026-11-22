@@ -870,16 +870,20 @@ function computeSpanDevelopment(series){
   const hasBaseline=series && typeof series.baseline==='number';
   const liveCumDev=(Number(d.totals?.pnl)||0)+(Number(d.realized_total ?? series.realized_total)||0);
   const devValue=hasBaseline ? (liveCumDev - series.baseline) : (Number(series.development ?? rawPoints[rawPoints.length-1].value)||0);
-  const devPct=invested ? (100 * devValue / invested) : 0;
+  const devPct=invested > 1e-9 ? (100 * devValue / invested) : 0;
   const points=rawPoints.map(p=>({
     date:p.date,
     value:Number(p.value)||0,
-    portfolio_value:typeof p.portfolio_value==='number' ? p.portfolio_value : null
+    portfolio_value:typeof p.portfolio_value==='number' ? p.portfolio_value : null,
+    invested:typeof p.invested==='number' ? p.invested : null
   }));
   if(hasBaseline && points.length){
     points[points.length-1].value=Math.round(devValue*100)/100;
     if(typeof d.totals?.value==='number'){
       points[points.length-1].portfolio_value=d.totals.value;
+    }
+    if(typeof d.totals?.invested==='number'){
+      points[points.length-1].invested=d.totals.invested;
     }
   }
   return {value:devValue,pct:devPct,points};
@@ -899,9 +903,11 @@ function renderDevelopmentHeadline(series, scrubPoint=null){
   const d=state.dashboard;
   const base=d?.base_currency || state.user?.base_currency || 'SEK';
   if(scrubPoint && d){
-    const invested=Number(d.totals?.invested)||0;
+    const invested=scrubPoint.invested!=null
+      ? (Number(scrubPoint.invested)||0)
+      : (Number(d.totals?.invested)||0);
     const val=Number(scrubPoint.value)||0;
-    const pct=invested ? (100 * val / invested) : 0;
+    const pct=invested > 1e-9 ? (100 * val / invested) : 0;
     const cleanVal=Math.abs(val)<0.5?0:val;
     const cleanPct=Math.abs(pct)<0.005?0:pct;
     const neg=cleanVal<0;
