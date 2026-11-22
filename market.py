@@ -1126,7 +1126,7 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
         take = np.arange(0, len(idx), step)
         if take[-1] != len(idx) - 1:
             take = np.r_[take, len(idx) - 1]
-        points = [{'date': idx[i].date().isoformat(), 'value': round(float(dev_series[i]), 2), 'portfolio_value': 0.0} for i in take]
+        points = [{'date': idx[i].date().isoformat(), 'value': round(float(dev_series[i]), 2), 'portfolio_value': 0.0, 'invested': 0.0} for i in take]
         return {'points': points, 'range': span, 'warnings': [],
                 'estimated_assets': [], 'excluded_assets': [], 'price_count': 0,
                 'baseline': round(baseline, 2),
@@ -1197,6 +1197,7 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     val_mat = np.where(valued_mask, qty_arr * px_arr * fx_arr, 0.0)
     cost_mat = np.where(valued_mask, cost_arr, 0.0)
     portfolio_daily = np.ascontiguousarray(val_mat).sum(axis=1)
+    invested_daily = np.ascontiguousarray(cost_mat).sum(axis=1)
     unrealized_daily = np.ascontiguousarray(val_mat - cost_mat).sum(axis=1)
 
     # Cumulative Development = Unrealized P/L + Realized P/L
@@ -1213,7 +1214,7 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     step=max(1,int(np.ceil(len(idx)/max_points)))
     take=np.arange(0,len(idx),step)
     if take[-1]!=len(idx)-1:take=np.r_[take,len(idx)-1]
-    points=[{'date':idx[i].date().isoformat(),'value':round(float(dev_series[i]),2),'portfolio_value':round(float(portfolio_daily[i]),2)} for i in take]
+    points=[{'date':idx[i].date().isoformat(),'value':round(float(dev_series[i]),2),'portfolio_value':round(float(portfolio_daily[i]),2),'invested':round(float(invested_daily[i]),2)} for i in take]
     _LOG.info('market.history span=%s total_seconds=%.2f prices_seconds=%.2f fx_seconds=%.2f assets=%d',
               span,time.perf_counter()-begin,prices_elapsed,fx_elapsed,len(assets))
     return {'points':points,'range':span,'warnings':warnings,
