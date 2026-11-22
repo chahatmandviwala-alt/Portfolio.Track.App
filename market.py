@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 import requests
 from sqlalchemy import select
+import portfolio
 from storage import MarketCache, Session, engine
 
 _LOG = logging.getLogger('uvicorn.error')
@@ -947,7 +948,7 @@ def trade_fx_rates(df: pd.DataFrame, base: str, preserve_legacy_sek: bool = Fals
 
 
 _HISTORY_COLUMNS = ['trade_date', 'asset', 'side', 'quantity', 'ticker', 'trade_ccy',
-                    'price_trade_ccy', 'fx_to_base']
+                    'price_trade_ccy', 'charges_trade_ccy', 'stt_trade_ccy', 'fx_to_base']
 
 
 def history_revision(df: pd.DataFrame, base: str) -> str:
@@ -1034,35 +1035,107 @@ def _daily_frame(frame: pd.DataFrame, days: pd.DatetimeIndex) -> pd.DataFrame:
     return frame.reindex(frame.index.union(days)).sort_index().ffill().reindex(days)
 
 
+def _daily_fifo_state(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, float]:
+    """Replay trades chronologically with exact portfolio.py FIFO rules on unit_base.
+
+    Returns end-of-day (qty_df, cost_df, cum_realized_series, all_time_realized).
+    """
+    dd = portfolio.derived(df)
+    temp = dd.copy()
+    temp['_side_rank'] = np.where(temp.side == 'BUY', 0, 1)
+    temp['_row'] = np.arange(len(temp))
+    temp = temp.sort_values(['trade_date', '_side_rank', '_row'], kind='stable')
+
+    qty_map: dict[str, dict[pd.Timestamp, float]] = {}
+    cost_map: dict[str, dict[pd.Timestamp, float]] = {}
+    realized_by_day: dict[pd.Timestamp, float] = {}
+
+    for asset, g in temp.groupby('asset', sort=False):
+        lots: list[list[float]] = []
+        q_days: dict[pd.Timestamp, float] = {}
+        c_days: dict[pd.Timestamp, float] = {}
+        for row in g.itertuples(index=False):
+            day = row.trade_date.normalize()
+            n = float(row.quantity)
+            unit = float(row.unit_base)
+            if row.side == 'BUY':
+                lots.append([n, unit])
+            else:
+                left = n
+                realized_delta = 0.0
+                while left > 1e-9 and lots:
+                    lot = lots[0]
+                    qty = min(left, lot[0])
+                    left -= qty
+                    lot[0] -= qty
+                    realized_delta += (unit - lot[1]) * qty
+                    if lot[0] <= 1e-9:
+                        lots.pop(0)
+                if realized_delta:
+                    realized_by_day[day] = realized_by_day.get(day, 0.0) + realized_delta
+            rem = sum(lot[0] for lot in lots)
+            cost = sum(lot[0] * lot[1] for lot in lots)
+            q_days[day] = rem
+            c_days[day] = cost
+        qty_map[asset] = q_days
+        cost_map[asset] = c_days
+
+    qty_df = pd.DataFrame(qty_map, dtype='float64').sort_index().ffill().fillna(0.0)
+    cost_df = pd.DataFrame(cost_map, dtype='float64').sort_index().ffill().fillna(0.0)
+    if realized_by_day:
+        r_series = pd.Series(realized_by_day, dtype='float64').sort_index().cumsum()
+        all_time_realized = float(r_series.iloc[-1])
+    else:
+        r_series = pd.Series(dtype='float64')
+        all_time_realized = 0.0
+    return qty_df, cost_df, r_series, all_time_realized
+
+
 def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
-    """Daily account market value; exact original vectorized valuation model."""
+    """Daily portfolio Development = Unrealized P/L + Realized P/L for the selected timeframe."""
     if span not in ('1M','3M','6M','1Y','3Y','MAX'): raise ValueError('Unsupported range')
-    if df.empty: return {'points': [], 'warnings': [], 'estimated_assets': [], 'range': span}
+    if df.empty:
+        return {'points': [], 'warnings': [], 'estimated_assets': [], 'excluded_assets': [],
+                'range': span, 'baseline': 0.0, 'development': 0.0, 'realized_total': 0.0}
     end = date.today()
     first = df.trade_date.min().date()
     days = {'1M':31,'3M':92,'6M':183,'1Y':366,'3Y':1096,'MAX':999999}[span]
     start = first if span == 'MAX' else max(first, end-timedelta(days=days))
-    if start > end: return {'points': [], 'warnings': [], 'estimated_assets': [], 'range': span}
+    if start > end:
+        return {'points': [], 'warnings': [], 'estimated_assets': [], 'excluded_assets': [],
+                'range': span, 'baseline': 0.0, 'development': 0.0, 'realized_total': 0.0}
     idx = pd.date_range(start, end, freq='D')
-    delta = df[['trade_date','asset','side','quantity']].copy()
-    delta['trade_date'] = delta.trade_date.dt.normalize()
-    delta['signed_qty'] = delta.quantity * np.where(delta.side == 'BUY',1,-1)
-    changes = delta.pivot_table(index='trade_date', columns='asset', values='signed_qty',
-                                aggfunc='sum', fill_value=0)
-    changes = changes.sort_index().cumsum().clip(lower=0).reindex(idx, method='ffill').fillna(0)
-    active_cols = [col for col in changes.columns if changes[col].gt(0).any()]
+
+    qty_all, cost_all, realized_series, all_time_realized = _daily_fifo_state(df)
+    changes = qty_all.reindex(idx, method='ffill').fillna(0.0)
+    costs = cost_all.reindex(idx, method='ffill').fillna(0.0)
+    if not realized_series.empty:
+        cum_realized = realized_series.reindex(idx, method='ffill').fillna(0.0).to_numpy(dtype=float)
+    else:
+        cum_realized = np.zeros(len(idx), dtype=float)
+
+    active_cols = [col for col in changes.columns if changes[col].gt(1e-9).any()]
+    rebase = (span != 'MAX' and start > first)
+
     if not active_cols:
+        cum_dev = cum_realized
+        baseline = float(cum_dev[0]) if rebase else 0.0
+        dev_series = cum_dev - baseline
         max_points = 920
         step = max(1, int(np.ceil(len(idx) / max_points)))
         take = np.arange(0, len(idx), step)
         if take[-1] != len(idx) - 1:
             take = np.r_[take, len(idx) - 1]
-        points = [{'date': idx[i].date().isoformat(), 'value': 0.0} for i in take]
+        points = [{'date': idx[i].date().isoformat(), 'value': round(float(dev_series[i]), 2)} for i in take]
         return {'points': points, 'range': span, 'warnings': [],
                 'estimated_assets': [], 'excluded_assets': [], 'price_count': 0,
-                'source': 'Yahoo Finance daily closes (latest cached NSE official close applied when available) + Frankfurter FX; trade-price estimates flagged'}
+                'baseline': round(baseline, 2),
+                'development': round(float(dev_series[-1]), 2),
+                'realized_total': round(all_time_realized, 2),
+                'source': 'Daily development (Unrealized P/L + Realized P/L) using Yahoo Finance daily closes + Frankfurter FX'}
 
     changes = changes[active_cols]
+    costs = costs[active_cols]
     assets = active_cols
     chronological = df[df.asset.isin(assets)].sort_values('trade_date', kind='stable')
     latest = chronological.drop_duplicates('asset', keep='last').set_index('asset')
@@ -1085,12 +1158,14 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     prices_elapsed = time.perf_counter() - begin
     fx_elapsed = 0.0
     prices = _overlay_official_nse_history(prices, end)
-    daily_trades = df[df.asset.isin(assets)].assign(day=delta.loc[df.asset.isin(assets), 'trade_date'])
+
+    sub_df = df[df.asset.isin(assets)]
+    daily_trades = sub_df.assign(day=sub_df.trade_date.dt.normalize())
     daily_trades = daily_trades.drop_duplicates(['day', 'asset'], keep='last').set_index(['day', 'asset'])
     recorded_prices = _daily_frame(daily_trades.price_trade_ccy.unstack(), idx).reindex(columns=assets)
     market_prices = _daily_frame(pd.DataFrame(prices, dtype='float64'), idx).reindex(columns=tickers)
     market_prices.columns = assets
-    positive = changes.gt(0)
+    positive = changes.gt(1e-9)
     estimated = (market_prices.isna() & recorded_prices.notna() & positive).any()
     prices_used = market_prices.fillna(recorded_prices)
     unknown = (prices_used.isna() & positive).any()
@@ -1111,22 +1186,40 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     estimated_assets = estimated.index[estimated].tolist()
     unknown_assets = unknown.index[unknown].tolist()
     warnings = []
-    mat = np.ascontiguousarray(changes.to_numpy(dtype=float) *
-                               np.nan_to_num(prices_used.to_numpy(dtype=float), nan=0) *
-                               np.nan_to_num(asset_rates.to_numpy(dtype=float), nan=0))
+
+    # Exclude unvalued (missing price or FX) assets from both market value and cost basis
+    # on affected days, matching portfolio.summarize().
+    valued_mask = (positive & prices_used.notna() & asset_rates.notna()).to_numpy()
+    qty_arr = changes.to_numpy(dtype=float)
+    cost_arr = costs.to_numpy(dtype=float)
+    px_arr = np.nan_to_num(prices_used.to_numpy(dtype=float), nan=0.0)
+    fx_arr = np.nan_to_num(asset_rates.to_numpy(dtype=float), nan=0.0)
+    val_mat = np.where(valued_mask, qty_arr * px_arr * fx_arr, 0.0)
+    cost_mat = np.where(valued_mask, cost_arr, 0.0)
+    unrealized_daily = np.ascontiguousarray(val_mat - cost_mat).sum(axis=1)
+
+    # Cumulative Development = Unrealized P/L + Realized P/L
+    cum_dev = unrealized_daily + cum_realized
+    baseline = float(cum_dev[0]) if rebase else 0.0
+    dev_series = cum_dev - baseline
+
     if price_errors:warnings.append(f'Historical quote errors for {len(price_errors)} ticker(s).')
     if fx_errors:warnings.append(f'Historical FX errors for {len(fx_errors)} currency pair(s); recorded transaction FX used as an estimate where possible.')
     if estimated_assets:warnings.append('Some dates use the last trade price as an estimate where market-history quotes are missing.')
     if unknown_assets:warnings.append('Some assets/dates have no usable quote or FX rate and are omitted from those historical totals.')
-    total=mat.sum(axis=1)
+
     max_points=920
     step=max(1,int(np.ceil(len(idx)/max_points)))
     take=np.arange(0,len(idx),step)
     if take[-1]!=len(idx)-1:take=np.r_[take,len(idx)-1]
-    points=[{'date':idx[i].date().isoformat(),'value':round(float(total[i]),2)} for i in take]
+    points=[{'date':idx[i].date().isoformat(),'value':round(float(dev_series[i]),2)} for i in take]
     _LOG.info('market.history span=%s total_seconds=%.2f prices_seconds=%.2f fx_seconds=%.2f assets=%d',
               span,time.perf_counter()-begin,prices_elapsed,fx_elapsed,len(assets))
     return {'points':points,'range':span,'warnings':warnings,
             'estimated_assets':sorted(set(estimated_assets)),
             'excluded_assets':sorted(set(unknown_assets)),
-            'price_count':len(prices),'source':'Yahoo Finance daily closes (latest cached NSE official close applied when available) + Frankfurter FX; trade-price estimates flagged'}
+            'price_count':len(prices),
+            'baseline':round(baseline,2),
+            'development':round(float(dev_series[-1]),2),
+            'realized_total':round(all_time_realized,2),
+            'source':'Daily development (Unrealized P/L + Realized P/L) using Yahoo Finance daily closes (latest cached NSE official close applied when available) + Frankfurter FX; trade-price estimates flagged'}

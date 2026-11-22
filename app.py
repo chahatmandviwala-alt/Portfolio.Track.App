@@ -231,6 +231,11 @@ def dashboard_payload(p: Portfolio, ledger: Ledger,
                 fx[ccy]=float(prev.iloc[-1].fx_to_base)
                 fxwarns.append(f'Current FX unavailable for {ccy} → {p.base_currency}; using last recorded trade FX as an estimate.')
     out=engine.summarize(d,p.base_currency,fx)
+    if not d.empty:
+        _, realized_rows, _ = engine.fifo(engine.derived(d), 'unit_base')
+        out['realized_total'] = round(sum(r['realized'] for r in realized_rows), 2)
+    else:
+        out['realized_total'] = 0.0
     out['warnings']=fxwarns+out['warnings']
     out['base_currency']=p.base_currency
     out['trades_count']=len(d)
