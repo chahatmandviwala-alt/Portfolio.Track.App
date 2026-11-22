@@ -40,7 +40,16 @@ function fmt(v,ccy=state.dashboard?.base_currency ?? state.user?.base_currency ?
 function signedFmt(v,ccy=state.dashboard?.base_currency ?? state.user?.base_currency ?? 'SEK',digits=2){
   if(v==null)return '—';if(state.hidden)return '••••••';
   const n=Number(v)||0;
+  const eps=digits===0?0.5:Math.pow(10,-digits)/2;
+  if(Math.abs(n)<eps)return fmt(0,ccy,digits);
   return `${n<0?'-':'+'}${fmt(Math.abs(n),ccy,digits)}`;
+}
+function signedAmt(v,ccy=state.dashboard?.base_currency ?? state.user?.base_currency ?? 'SEK',digits=0){
+  if(v==null)return '—';if(state.hidden)return '••••••';
+  const n=Number(v)||0;
+  const eps=digits===0?0.5:Math.pow(10,-digits)/2;
+  if(Math.abs(n)<eps)return fmt(0,ccy,digits);
+  return `${n<0?'-':''}${fmt(Math.abs(n),ccy,digits)}`;
 }
 function signedPct(n){return state.hidden?'••••':`${Number(n)>=0?'+':''}${compact(n,2)}%`;}
 function toast(message,isError=false){const el=$('toast');el.textContent=message;el.className='toast show'+(isError?' error':'');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),4200);}
@@ -657,7 +666,7 @@ function renderDashboard(){
   const t=d.totals, base=d.base_currency;
   $('total-value').textContent=fmt(t.value,base,0);
   $('hero-ccy').textContent=base;
-  $('main-change').innerHTML=`<span class="pnl-pill ${t.pnl<0?'negative':''}">${html(signedPct(t.pnl_pct))}</span><span class="muted">Unrealized gain / loss</span>`;
+  renderDevelopmentHeadline(state.history[state.historyRange]??null);
   $('invested-value').textContent=fmt(t.invested,base,0);
   $('unrealized-value').textContent=fmt(t.pnl,base,0);
   $('unrealized-value').classList.toggle('negative',t.pnl<0);
@@ -666,7 +675,7 @@ function renderDashboard(){
   const holdings = sortedHomeHoldings(d.holdings);
   $('main-holdings').innerHTML=holdings.length?holdings.map(h=>{
     const pnlPct = h.invested ? 100*(h.pnl||0)/h.invested : 0;
-    return `<div class="holding-row home-holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">${state.hidden?'••••':quantityFmt(h.quantity)} shares</div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(pnlPct))}</span></div></div>`;
+    return `<div class="holding-row home-holding-row">${logo(h)}<div class="holding-info"><div class="holding-name">${html(h.asset)}</div><div class="holding-subtitle">Qty ${state.hidden?'••••':quantityFmt(h.quantity)}</div></div><div class="holding-value"><strong>${html(fmt(h.value,base,0))}</strong><span class="${(h.pnl||0)<0?'negative':''}">${html(signedPct(pnlPct))}</span></div></div>`;
   }).join(''):emptyMessage('Nothing in your portfolio yet','Add a trade or upload your existing trades CSV.','trade');
   activatePendingLogoSearch($('main-holdings'));
 }
@@ -848,13 +857,57 @@ function renderCapitalChart(animate=false){
   if(animate)animateCapitalTiles(target,previousRects,previousFocused,state.capitalFocus);
 }
 
+function computeSpanDevelopment(series){
+  const d=state.dashboard;
+  if(!d)return null;
+  const invested=Number(d.totals?.invested)||0;
+  const rawPoints=series?.points||[];
+  if(!rawPoints.length){
+    if(!d.trades_count)return {value:0,pct:0,points:[]};
+    return null;
+  }
+  const hasBaseline=series && typeof series.baseline==='number';
+  const liveCumDev=(Number(d.totals?.pnl)||0)+(Number(d.realized_total ?? series.realized_total)||0);
+  const devValue=hasBaseline ? (liveCumDev - series.baseline) : (Number(series.development ?? rawPoints[rawPoints.length-1].value)||0);
+  const devPct=invested ? (100 * devValue / invested) : 0;
+  const points=rawPoints.map(p=>({date:p.date,value:p.value}));
+  if(hasBaseline && points.length){
+    points[points.length-1].value=Math.round(devValue*100)/100;
+  }
+  return {value:devValue,pct:devPct,points};
+}
+
+function renderDevelopmentHeadline(series){
+  const el=$('main-change');
+  if(!el)return;
+  const d=state.dashboard;
+  const spanLabel=series?.range || state.historyRange || '1M';
+  const dev=computeSpanDevelopment(series);
+  if(!d || !dev){
+    el.innerHTML=`<span class="pnl-pill">—</span><span class="muted">Development (${html(spanLabel)})</span>`;
+    return;
+  }
+  const base=d.base_currency || state.user?.base_currency || 'SEK';
+  const cleanVal=Math.abs(dev.value)<0.5?0:dev.value;
+  const cleanPct=Math.abs(dev.pct)<0.005?0:dev.pct;
+  const neg=cleanVal<0;
+  const pillText=state.hidden
+    ? '•••• (••••••)'
+    : `${signedPct(cleanPct)} (${signedAmt(cleanVal,base,0)})`;
+  el.innerHTML=`<span class="pnl-pill ${neg?'negative':''}">${html(pillText)}</span><span class="muted">Development (${html(spanLabel)})</span>`;
+}
+
 function renderChart(series){
-  const target=$('history-chart');const points=series?.points||[];
-  if(!points.length){if(state.chart){state.chart.clear();}target.innerHTML='<div class="empty" style="margin:30px 10px">Portfolio history will appear here when historical data is available.</div>';return;}
+  renderDevelopmentHeadline(series);
+  const target=$('history-chart');
+  const dev=computeSpanDevelopment(series);
+  const points=dev?.points||series?.points||[];
+  if(!points.length){if(state.chart){state.chart.clear();}target.innerHTML='<div class="empty" style="margin:30px 10px">Portfolio development will appear here when historical data is available.</div>';return;}
   if(state.chart && !target.querySelector('canvas')){state.chart.dispose();state.chart=null;target.innerHTML='';}
   const data=points.map(p=>[p.date,p.value]);
   const dark = state.theme === 'dark';
-  const rising=data[data.length-1][1]>=data[0][1];
+  const latestVal = dev ? dev.value : data[data.length-1][1];
+  const rising = latestVal >= -0.005;
   const color=rising?(dark?'#58e3fb':'#1b7fb3'):(dark?'#f27b89':'#c94052');
   if(typeof echarts==='undefined'){
     const ys=data.map(p=>p[1]);const min=Math.min(...ys);const max=Math.max(...ys);const width=640,height=230,pad=12;
@@ -869,20 +922,27 @@ function renderChart(series){
     ? (dark ? 'rgba(88,227,251,0)' : 'rgba(27,127,179,0)')
     : (dark ? 'rgba(242,123,137,0)' : 'rgba(201,64,82,0)');
   const baseCcy = state.dashboard?.base_currency || state.user?.base_currency || 'SEK';
+  const ys = data.map(p=>p[1]);
+  const crossesZero = Math.min(...ys) < 0 && Math.max(...ys) > 0;
+  const markLine = crossesZero ? {
+    silent:true, symbol:['none','none'], label:{show:false},
+    lineStyle:{color:dark?'rgba(255,255,255,.14)':'rgba(38,32,22,.16)',type:'dashed',width:1},
+    data:[{yAxis:0}]
+  } : undefined;
   state.chart.setOption({animationDuration:280,grid:{left:4,right:5,top:16,bottom:12,containLabel:false},
     xAxis:{type:'time',boundaryGap:false,axisLine:{show:false},axisTick:{show:false},axisLabel:{show:false},splitLine:{show:false},min:data[0][0],max:data[data.length-1][0]},
     yAxis:{type:'value',scale:true,axisLabel:{show:false},axisLine:{show:false},axisTick:{show:false},splitLine:{show:false}},
     tooltip:{
       trigger:'axis',confine:true,
-      axisPointer:{type:'line',lineStyle:{color:dark?'rgba(255,255,255,.18)':'rgba(20,29,46,.16)',width:1,type:'dashed'}},
+      axisPointer:{type:'line',lineStyle:{color:dark?'rgba(255,255,255,.18)':'rgba(38,32,22,.18)',width:1,type:'dashed'}},
       backgroundColor:dark?'rgba(20,24,31,.96)':'rgba(248,245,239,.97)',
       borderWidth:1,borderColor:dark?'rgba(255,255,255,.12)':'rgba(38,32,22,.12)',
       padding:[10,13],
       textStyle:{color:dark?'#eef4fc':'#1f1d1a',fontSize:14},
-      formatter:(items)=>{if(!items?.length)return '';const p=items[0];return `<div style="font-size:12px;opacity:.68;margin-bottom:4px">${html(new Date(p.value[0]).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}))}</div><b style="font-variant-numeric:tabular-nums">${html(fmt(p.value[1],baseCcy,0))}</b>`;}
+      formatter:(items)=>{if(!items?.length)return '';const p=items[0];return `<div style="font-size:12px;opacity:.68;margin-bottom:4px">${html(new Date(p.value[0]).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}))}</div><b style="font-variant-numeric:tabular-nums">${html(signedFmt(p.value[1],baseCcy,0))}</b>`;}
     },
     series:[{type:'line',data,symbol:'circle',symbolSize:6,showSymbol:false,sampling:'lttb',smooth:false,
-      itemStyle:{color},lineStyle:{color,width:2.4},
+      itemStyle:{color},lineStyle:{color,width:2.4},markLine,
       areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:gradTop},{offset:1,color:gradBot}])}}]
   },true);
   state.chart.resize();
@@ -917,7 +977,7 @@ async function loadRange(span, silent=false){
   state.historyRange=span;
   document.querySelectorAll('[data-range]').forEach(el=>el.classList.toggle('selected',el.dataset.range===span));
   if(state.history[span]){renderChart(state.history[span]);return;}
-  if(!silent) $('history-loading').classList.remove('hidden');
+  if(!silent){renderDevelopmentHeadline(null);$('history-loading').classList.remove('hidden');}
   try{
     const data=await fetchHistorySpan(span);
     if(state.historyRange===span)renderChart(data);

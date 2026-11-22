@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#090b0e">
   <meta name="description" content="Track your investments beautifully, in one place, privately.">
-  <title>Track.</title>
   <title>Track — All your investments, one place.</title>
   <link id="app-favicon" rel="icon" type="image/png" href="/static/logos/logo.png">
   <link rel="apple-touch-icon" href="/static/logos/logo.png">
@@ -14,7 +13,7 @@
       const img = new Image();
       img.onload = () => {
         const size = 128;
-        const r = size * 0.22; // matches border-radius: 22% in logo.css
+        const r = size * 0.22;
         const canvas = document.createElement('canvas');
         canvas.width = size;
         canvas.height = size;
@@ -37,8 +36,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css?v=17">
-  <link rel="stylesheet" href="/static/theme.css?v=17">
+  <link rel="stylesheet" href="/static/styles.css?v=18">
+  <link rel="stylesheet" href="/static/theme.css?v=18">
   <link rel="stylesheet" href="/static/logo.css?v=2">
   <script>
     // Keep the mobile browser's theme color in sync with the user's appearance setting.
@@ -101,7 +100,7 @@
     });
   </script>
   <script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-  <script defer src="/static/app.js?v=17"></script>
+  <script defer src="/static/app.js?v=18"></script>
 </head>
 <body>
   <div class="ambient ambient-left"></div><div class="ambient ambient-right"></div>
@@ -180,8 +179,8 @@
                 </button>
               </div>
               <div class="balance-row"><h1 id="total-value" class="total-value">—</h1><span class="currency-pill" id="hero-ccy">SEK</span></div>
-              <div id="main-change" class="change-line"><span class="pnl-pill">—</span><span class="muted">Unrealized gain / loss</span></div>
-              <div class="chart-section"><div id="history-chart" class="history-chart" role="img" aria-label="Portfolio value over time"></div><div id="history-loading" class="chart-wait hidden"><span class="spinner"></span> Building portfolio history…</div></div>
+              <div id="main-change" class="change-line"><span class="pnl-pill">—</span><span class="muted">Development (1M)</span></div>
+              <div class="chart-section"><div id="history-chart" class="history-chart" role="img" aria-label="Portfolio development over time"></div><div id="history-loading" class="chart-wait hidden"><span class="spinner"></span> Building portfolio history…</div></div>
               <div class="range-row" id="ranges"><button class="selected" data-range="1M">1M</button><button data-range="3M">3M</button><button data-range="6M">6M</button><button data-range="1Y">1Y</button><button data-range="3Y">3Y</button><button data-range="MAX">MAX</button></div>
             </div>
 
