@@ -5,7 +5,7 @@ const state = {
   user:null, dashboard:null, trades:[], history:{}, historyRevision:null,
   historyRange:'1M', view:'home', homeSort:'value', sideFilter:'ALL',
   tradeSide:'BUY', authMode:'login', hidden:localStorage.getItem('track-private')==='true',
-  chart:null, capitalChart:null, capitalFocus:null,
+  chart:null, chartPoints:[], chartTimestamps:[], chartScrubIndex:null, capitalChart:null, capitalFocus:null,
   theme:localStorage.getItem('track-theme')==='light'?'light':'dark',
   tradeLimit:55, editId:null, lastTax:null, busy:false
 };
@@ -112,6 +112,7 @@ function closeSortMenu(){
 function nav(tab){
   if(!state.user)return;
   closeSortMenu();
+  endChartScrub();
   state.view=tab;
   document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id==='view-'+tab));
   document.querySelectorAll('.nav-btn').forEach(btn=>{
@@ -870,41 +871,233 @@ function computeSpanDevelopment(series){
   const liveCumDev=(Number(d.totals?.pnl)||0)+(Number(d.realized_total ?? series.realized_total)||0);
   const devValue=hasBaseline ? (liveCumDev - series.baseline) : (Number(series.development ?? rawPoints[rawPoints.length-1].value)||0);
   const devPct=invested ? (100 * devValue / invested) : 0;
-  const points=rawPoints.map(p=>({date:p.date,value:p.value}));
+  const points=rawPoints.map(p=>({
+    date:p.date,
+    value:Number(p.value)||0,
+    portfolio_value:typeof p.portfolio_value==='number' ? p.portfolio_value : null
+  }));
   if(hasBaseline && points.length){
     points[points.length-1].value=Math.round(devValue*100)/100;
+    if(typeof d.totals?.value==='number'){
+      points[points.length-1].portfolio_value=d.totals.value;
+    }
   }
   return {value:devValue,pct:devPct,points};
 }
 
-function renderDevelopmentHeadline(series){
+function formatScrubDate(isoDate){
+  if(!isoDate)return '';
+  const dt=new Date(isoDate+'T00:00:00');
+  if(Number.isNaN(dt.getTime()))return isoDate;
+  return dt.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+}
+
+function renderDevelopmentHeadline(series, scrubPoint=null){
   const el=$('main-change');
+  const totalEl=$('total-value');
   if(!el)return;
   const d=state.dashboard;
-  const spanLabel=series?.range || state.historyRange || '1M';
-  const dev=computeSpanDevelopment(series);
-  if(!d || !dev){
-    el.innerHTML=`<span class="pnl-pill">—</span><span class="muted">Development (${html(spanLabel)})</span>`;
+  const base=d?.base_currency || state.user?.base_currency || 'SEK';
+  if(scrubPoint && d){
+    const invested=Number(d.totals?.invested)||0;
+    const val=Number(scrubPoint.value)||0;
+    const pct=invested ? (100 * val / invested) : 0;
+    const cleanVal=Math.abs(val)<0.5?0:val;
+    const cleanPct=Math.abs(pct)<0.005?0:pct;
+    const neg=cleanVal<0;
+    const pillText=state.hidden
+      ? '•••• (••••••)'
+      : `${signedPct(cleanPct)} (${signedAmt(cleanVal,base,0)})`;
+    if(totalEl && scrubPoint.portfolio_value!=null){
+      totalEl.textContent=fmt(scrubPoint.portfolio_value,base,0);
+    }
+    el.innerHTML=`<span class="pnl-pill ${neg?'negative':''}">${html(pillText)}</span><span class="muted scrub-date">${html(formatScrubDate(scrubPoint.date))}</span>`;
     return;
   }
-  const base=d.base_currency || state.user?.base_currency || 'SEK';
+  if(totalEl && d){
+    totalEl.textContent=fmt(d.totals.value,base,0);
+  }
+  const dev=computeSpanDevelopment(series);
+  if(!d || !dev){
+    el.innerHTML='<span class="pnl-pill">—</span>';
+    return;
+  }
   const cleanVal=Math.abs(dev.value)<0.5?0:dev.value;
   const cleanPct=Math.abs(dev.pct)<0.005?0:dev.pct;
   const neg=cleanVal<0;
   const pillText=state.hidden
     ? '•••• (••••••)'
     : `${signedPct(cleanPct)} (${signedAmt(cleanVal,base,0)})`;
-  el.innerHTML=`<span class="pnl-pill ${neg?'negative':''}">${html(pillText)}</span><span class="muted">Development (${html(spanLabel)})</span>`;
+  el.innerHTML=`<span class="pnl-pill ${neg?'negative':''}">${html(pillText)}</span>`;
+}
+
+// Click/touch-and-hold scrubbing controller for the development chart.
+const chartScrub = {
+  timer:null, active:false, mode:null,
+  startX:0, startY:0, lastX:0, lastTouchEnd:0
+};
+
+function chartIndexFromClientX(clientX){
+  const pts=state.chartPoints;
+  if(!pts.length)return -1;
+  if(pts.length===1)return 0;
+  const target=$('history-chart');
+  if(!target)return -1;
+  const rect=target.getBoundingClientRect();
+  if(!rect.width)return -1;
+  const padL=4, padR=5;
+  const localX=Math.max(padL, Math.min(rect.width - padR, clientX - rect.left));
+  if(state.chart && state.chartTimestamps.length===pts.length){
+    try{
+      const coord=state.chart.convertFromPixel({seriesIndex:0},[localX, rect.height/2]);
+      if(Array.isArray(coord) && Number.isFinite(coord[0])){
+        const ts=coord[0], arr=state.chartTimestamps;
+        let lo=0, hi=arr.length-1;
+        while(lo<hi){
+          const mid=(lo+hi)>>1;
+          if(arr[mid]<ts)lo=mid+1; else hi=mid;
+        }
+        if(lo>0 && Math.abs(arr[lo-1]-ts) <= Math.abs(arr[lo]-ts)) return lo-1;
+        return lo;
+      }
+    }catch(_){}
+  }
+  const plotW=Math.max(1, rect.width - padL - padR);
+  const ratio=(localX - padL)/plotW;
+  return Math.max(0, Math.min(pts.length-1, Math.round(ratio*(pts.length-1))));
+}
+
+function updateChartScrubAt(clientX){
+  const idx=chartIndexFromClientX(clientX);
+  if(idx<0 || idx===state.chartScrubIndex)return;
+  state.chartScrubIndex=idx;
+  const pt=state.chartPoints[idx];
+  if(!pt)return;
+  renderDevelopmentHeadline(state.history[state.historyRange]??null, pt);
+  if(state.chart){
+    try{ state.chart.dispatchAction({type:'showTip',seriesIndex:0,dataIndex:idx}); }catch(_){}
+  }
+}
+
+function endChartScrub(){
+  clearTimeout(chartScrub.timer);
+  chartScrub.timer=null;
+  const wasActive=chartScrub.active;
+  chartScrub.active=false;
+  chartScrub.mode=null;
+  state.chartScrubIndex=null;
+  $('history-chart')?.classList.remove('is-scrubbing');
+  if(wasActive){
+    if(state.chart){
+      try{ state.chart.dispatchAction({type:'hideTip'}); state.chart.dispatchAction({type:'updateAxisPointer',currTrigger:'leave'}); }catch(_){}
+    }
+    renderDevelopmentHeadline(state.history[state.historyRange]??null, null);
+  }
+}
+
+function bindChartScrub(){
+  const target=$('history-chart');
+  if(!target || target.dataset.scrubBound)return;
+  target.dataset.scrubBound='1';
+  const HOLD_MS=180;
+  const MOVE_CANCEL_PX=10;
+
+  // Prevent browser context menu on long-press over the canvas.
+  target.addEventListener('contextmenu',e=>{
+    if(chartScrub.active || chartScrub.timer) e.preventDefault();
+  });
+
+  // Touch: require steady hold (180ms) before scrubbing so vertical scrolling & accidental taps stay untouched.
+  target.addEventListener('touchstart',e=>{
+    if(e.touches.length!==1 || !state.chartPoints.length)return;
+    const t=e.touches[0];
+    clearTimeout(chartScrub.timer);
+    chartScrub.mode='touch';
+    chartScrub.startX=t.clientX;
+    chartScrub.startY=t.clientY;
+    chartScrub.lastX=t.clientX;
+    chartScrub.timer=setTimeout(()=>{
+      chartScrub.timer=null;
+      if(chartScrub.mode!=='touch' || !state.chartPoints.length)return;
+      chartScrub.active=true;
+      target.classList.add('is-scrubbing');
+      try{ navigator.vibrate?.(10); }catch(_){}
+      updateChartScrubAt(chartScrub.lastX);
+    }, HOLD_MS);
+  },{passive:true});
+
+  target.addEventListener('touchmove',e=>{
+    if(chartScrub.mode!=='touch' || !e.touches.length)return;
+    const t=e.touches[0];
+    chartScrub.lastX=t.clientX;
+    if(!chartScrub.active){
+      if(Math.hypot(t.clientX-chartScrub.startX, t.clientY-chartScrub.startY) > MOVE_CANCEL_PX){
+        clearTimeout(chartScrub.timer);
+        chartScrub.timer=null;
+        chartScrub.mode=null;
+      }
+      return;
+    }
+    e.preventDefault();
+    updateChartScrubAt(t.clientX);
+  },{passive:false});
+
+  const finishTouch=()=>{
+    if(chartScrub.mode==='touch'){
+      chartScrub.lastTouchEnd=Date.now();
+      endChartScrub();
+    }
+  };
+  target.addEventListener('touchend',finishTouch,{passive:true});
+  target.addEventListener('touchcancel',finishTouch,{passive:true});
+
+  // Desktop mouse: require click-and-hold (180ms); plain hover or quick clicks do nothing.
+  target.addEventListener('mousedown',e=>{
+    if(e.button!==0 || !state.chartPoints.length)return;
+    if(Date.now()-chartScrub.lastTouchEnd < 600)return;
+    clearTimeout(chartScrub.timer);
+    chartScrub.mode='mouse';
+    chartScrub.startX=e.clientX;
+    chartScrub.startY=e.clientY;
+    chartScrub.lastX=e.clientX;
+    chartScrub.timer=setTimeout(()=>{
+      chartScrub.timer=null;
+      if(chartScrub.mode!=='mouse' || !state.chartPoints.length)return;
+      chartScrub.active=true;
+      target.classList.add('is-scrubbing');
+      updateChartScrubAt(chartScrub.lastX);
+    }, HOLD_MS);
+  });
+
+  window.addEventListener('mousemove',e=>{
+    if(chartScrub.mode!=='mouse')return;
+    if(!(e.buttons & 1)){ endChartScrub(); return; }
+    chartScrub.lastX=e.clientX;
+    if(chartScrub.active){
+      e.preventDefault();
+      updateChartScrubAt(e.clientX);
+    }
+  });
+
+  window.addEventListener('mouseup',()=>{
+    if(chartScrub.mode==='mouse') endChartScrub();
+  });
+  window.addEventListener('blur',()=>{
+    if(chartScrub.mode) endChartScrub();
+  });
 }
 
 function renderChart(series){
-  renderDevelopmentHeadline(series);
+  endChartScrub();
+  renderDevelopmentHeadline(series, null);
   const target=$('history-chart');
   const dev=computeSpanDevelopment(series);
   const points=dev?.points||series?.points||[];
+  state.chartPoints=points;
+  state.chartTimestamps=points.map(p=>Date.parse(p.date));
   if(!points.length){if(state.chart){state.chart.clear();}target.innerHTML='<div class="empty" style="margin:30px 10px">Portfolio development will appear here when historical data is available.</div>';return;}
   if(state.chart && !target.querySelector('canvas')){state.chart.dispose();state.chart=null;target.innerHTML='';}
-  const data=points.map(p=>[p.date,p.value]);
+  const data=points.map((p,i)=>[state.chartTimestamps[i],p.value]);
   const dark = state.theme === 'dark';
   const latestVal = dev ? dev.value : data[data.length-1][1];
   const rising = latestVal >= -0.005;
@@ -921,7 +1114,6 @@ function renderChart(series){
   const gradBot = rising
     ? (dark ? 'rgba(88,227,251,0)' : 'rgba(27,127,179,0)')
     : (dark ? 'rgba(242,123,137,0)' : 'rgba(201,64,82,0)');
-  const baseCcy = state.dashboard?.base_currency || state.user?.base_currency || 'SEK';
   const ys = data.map(p=>p[1]);
   const crossesZero = Math.min(...ys) < 0 && Math.max(...ys) > 0;
   const markLine = crossesZero ? {
@@ -933,16 +1125,13 @@ function renderChart(series){
     xAxis:{type:'time',boundaryGap:false,axisLine:{show:false},axisTick:{show:false},axisLabel:{show:false},splitLine:{show:false},min:data[0][0],max:data[data.length-1][0]},
     yAxis:{type:'value',scale:true,axisLabel:{show:false},axisLine:{show:false},axisTick:{show:false},splitLine:{show:false}},
     tooltip:{
-      trigger:'axis',confine:true,
-      axisPointer:{type:'line',lineStyle:{color:dark?'rgba(255,255,255,.18)':'rgba(38,32,22,.18)',width:1,type:'dashed'}},
-      backgroundColor:dark?'rgba(20,24,31,.96)':'rgba(248,245,239,.97)',
-      borderWidth:1,borderColor:dark?'rgba(255,255,255,.12)':'rgba(38,32,22,.12)',
-      padding:[10,13],
-      textStyle:{color:dark?'#eef4fc':'#1f1d1a',fontSize:14},
-      formatter:(items)=>{if(!items?.length)return '';const p=items[0];return `<div style="font-size:12px;opacity:.68;margin-bottom:4px">${html(new Date(p.value[0]).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}))}</div><b style="font-variant-numeric:tabular-nums">${html(signedFmt(p.value[1],baseCcy,0))}</b>`;}
+      show:true, showContent:false, trigger:'axis', triggerOn:'none',
+      axisPointer:{type:'line',snap:true,lineStyle:{color:dark?'rgba(255,255,255,.24)':'rgba(38,32,22,.24)',width:1.2,type:'dashed'}}
     },
-    series:[{type:'line',data,symbol:'circle',symbolSize:6,showSymbol:false,sampling:'lttb',smooth:false,
-      itemStyle:{color},lineStyle:{color,width:2.4},markLine,
+    series:[{type:'line',data,symbol:'circle',symbolSize:7,showSymbol:false,smooth:false,
+      itemStyle:{color,borderColor:dark?'#12151b':'#f8f5ef',borderWidth:2},
+      emphasis:{scale:true},
+      lineStyle:{color,width:2.4},markLine,
       areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:gradTop},{offset:1,color:gradBot}])}}]
   },true);
   state.chart.resize();
@@ -974,6 +1163,7 @@ function prefetchRange(span){
 }
 
 async function loadRange(span, silent=false){
+  endChartScrub();
   state.historyRange=span;
   document.querySelectorAll('[data-range]').forEach(el=>el.classList.toggle('selected',el.dataset.range===span));
   if(state.history[span]){renderChart(state.history[span]);return;}
@@ -1168,6 +1358,7 @@ async function importFile(e){const file=e.target.files[0];if(!file)return;
 }
 function bindEvents(){
   bindAssetLogoImages();
+  bindChartScrub();
   document.querySelectorAll('[data-tab]').forEach(el=>{
     el.addEventListener('click',()=>nav(el.dataset.tab));
     if(el.getAttribute('role')==='button'){
