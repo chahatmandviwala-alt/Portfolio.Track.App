@@ -95,10 +95,8 @@ def read_cash_txns(csv_text: str) -> pd.DataFrame:
         raise ValueError('Cash transaction amount must be non-zero.')
     if (d['fx_rate'] <= 0).any():
         raise ValueError('Cash transaction FX rate must be positive.')
-    if (d['fee_foreign'] < 0).any():
-        raise ValueError('Cash exchange fee cannot be negative.')
-    if (d['memo'].str.len() > 200).any():
-        raise ValueError('Memo field is too long (max 200 characters).')
+    if (d['memo'].str.len() > 500).any():
+        raise ValueError('Memo field is too long (max 500 characters).')
     inflow = d['txn_type'].isin(['Buy', 'Credit'])
     d['foreign_amount'] = np.where(inflow, d['foreign_amount'].abs(), -d['foreign_amount'].abs())
 
@@ -128,8 +126,8 @@ def ensure_valid_cash_txn(item: dict) -> dict:
         raise ValueError('Transaction type must be Buy, Sell, Debit, or Credit')
     val['txn_type'] = _TXN_CANONICAL[raw_type]
     val['memo'] = str(val['memo'] or '').strip()
-    if len(val['memo']) > 200:
-        raise ValueError('Memo is too long (max 200 characters)')
+    if len(val['memo']) > 500:
+        raise ValueError('Memo is too long (max 500 characters)')
     if not val['foreign_ccy'] or len(val['foreign_ccy']) > 4:
         raise ValueError('Enter a valid currency code (e.g. USD, EUR, SEK)')
     for field in CASH_NUMERIC_COLS:
@@ -149,8 +147,6 @@ def ensure_valid_cash_txn(item: dict) -> dict:
         raise ValueError('Amount must be greater than zero')
     if val['fx_rate'] <= 0:
         raise ValueError('FX rate must be positive')
-    if val['fee_foreign'] < 0:
-        raise ValueError('Exchange fee cannot be negative')
     amt = abs(val['foreign_amount'])
     val['foreign_amount'] = amt if val['txn_type'] in ('Buy', 'Credit') else -amt
     return val
@@ -187,41 +183,45 @@ def recompute_average_cost(trades_df: pd.DataFrame) -> pd.DataFrame:
             .fillna(0.0)
         )
 
-    df['base_amount'] = df['foreign_amount'] * df['fx_rate']
-    df['fee_base'] = df['fee_foreign'] * df['fx_rate']
-    df['realized_pl_base'] = 0.0
-    df['running_position'] = 0.0
-    df['running_cost_base'] = 0.0
-    df['running_avg_cost'] = 0.0
-    df['sale_proceeds_base'] = 0.0
-    df['sale_cost_base'] = 0.0
+    f_amt_arr = df['foreign_amount'].to_numpy(dtype=float)
+    fx_arr = df['fx_rate'].to_numpy(dtype=float)
+    fee_f_arr = df['fee_foreign'].to_numpy(dtype=float)
+    base_amt_arr = f_amt_arr * fx_arr
+    fee_base_arr = fee_f_arr * fx_arr
+    ccy_list = df['foreign_ccy'].astype(str).str.upper().tolist()
+    type_list = df['txn_type'].astype(str).str.upper().tolist()
 
-    positions: dict[str, dict[str, float]] = {}
-    for idx, row in df.iterrows():
-        ccy = str(row['foreign_ccy']).upper()
-        if ccy not in positions:
-            positions[ccy] = {'pos': 0.0, 'cost': 0.0}
-        pos = positions[ccy]['pos']
-        cost = positions[ccy]['cost']
+    n_rows = len(df)
+    realized_arr = np.zeros(n_rows, dtype=float)
+    run_pos_arr = np.zeros(n_rows, dtype=float)
+    run_cost_arr = np.zeros(n_rows, dtype=float)
+    run_avg_arr = np.zeros(n_rows, dtype=float)
+    proceeds_arr = np.zeros(n_rows, dtype=float)
+    sale_cost_arr = np.zeros(n_rows, dtype=float)
 
-        txn_type = str(row['txn_type']).upper()
-        foreign_amount = float(row['foreign_amount'])
-        fx_rate = float(row['fx_rate'])
-        fee_base = float(row['fee_base'])
+    positions: dict[str, list[float]] = {}
+    for i in range(n_rows):
+        ccy = ccy_list[i]
+        rec = positions.get(ccy)
+        if rec is None:
+            rec = [0.0, 0.0]
+            positions[ccy] = rec
+        pos = rec[0]
+        cost = rec[1]
 
-        realized_pl = 0.0
-        sale_proceeds = 0.0
-        sale_cost = 0.0
+        txn_type = type_list[i]
+        units = abs(float(f_amt_arr[i]))
+        fx_rate = float(fx_arr[i])
+        fee_base = float(fee_base_arr[i])
 
-        if txn_type in ('BUY', 'CREDIT'):
-            units = abs(foreign_amount)
-            base_amount = units * fx_rate
-            cost_increase = base_amount + fee_base
+        if txn_type == 'BUY' or txn_type == 'CREDIT':
             new_pos = pos + units
-            new_cost = cost + cost_increase
-        elif txn_type in ('SELL', 'DEBIT'):
-            units = abs(foreign_amount)
-            avg_cost = (cost / pos) if pos > 0 else 0.0
+            new_cost = cost + (units * fx_rate + fee_base)
+            realized_pl = 0.0
+            sale_proceeds = 0.0
+            sale_cost = 0.0
+        elif txn_type == 'SELL' or txn_type == 'DEBIT':
+            avg_cost = (cost / pos) if pos > 0.0 else 0.0
             sale_cost = avg_cost * units
             sale_proceeds = units * fx_rate - fee_base
             realized_pl = sale_proceeds - sale_cost
@@ -230,16 +230,28 @@ def recompute_average_cost(trades_df: pd.DataFrame) -> pd.DataFrame:
         else:
             new_pos = pos
             new_cost = cost
+            realized_pl = 0.0
+            sale_proceeds = 0.0
+            sale_cost = 0.0
 
-        positions[ccy]['pos'] = new_pos
-        positions[ccy]['cost'] = new_cost
+        rec[0] = new_pos
+        rec[1] = new_cost
 
-        df.at[idx, 'realized_pl_base'] = realized_pl
-        df.at[idx, 'running_position'] = new_pos
-        df.at[idx, 'running_cost_base'] = new_cost
-        df.at[idx, 'running_avg_cost'] = (new_cost / new_pos) if abs(new_pos) > 1e-12 else 0.0
-        df.at[idx, 'sale_proceeds_base'] = sale_proceeds
-        df.at[idx, 'sale_cost_base'] = sale_cost
+        realized_arr[i] = realized_pl
+        run_pos_arr[i] = new_pos
+        run_cost_arr[i] = new_cost
+        run_avg_arr[i] = (new_cost / new_pos) if abs(new_pos) > 1e-12 else 0.0
+        proceeds_arr[i] = sale_proceeds
+        sale_cost_arr[i] = sale_cost
+
+    df['base_amount'] = base_amt_arr
+    df['fee_base'] = fee_base_arr
+    df['realized_pl_base'] = realized_arr
+    df['running_position'] = run_pos_arr
+    df['running_cost_base'] = run_cost_arr
+    df['running_avg_cost'] = run_avg_arr
+    df['sale_proceeds_base'] = proceeds_arr
+    df['sale_cost_base'] = sale_cost_arr
 
     return df.drop(columns=['txn_order', '_orig_idx', '_day'])
 
