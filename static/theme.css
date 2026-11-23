@@ -402,6 +402,12 @@ html[data-theme="light"] .range-row button.selected {
   box-shadow: var(--card-shadow);
   padding: 18px 22px 8px;
 }
+.holdings-panel.list-panel {
+  margin-top: 22px;
+}
+.holdings-panel .empty {
+  margin: 8px 0 10px;
+}
 .section-heading.holdings-panel-head {
   margin: 0 0 8px;
   padding-bottom: 12px;
@@ -752,10 +758,10 @@ html[data-theme="light"] .asset-icon.has-logo { filter: none; }
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  border-bottom: 2px solid var(--border-strong);
+  border-bottom: 1px solid var(--border);
   padding: 24px 2px;
 }
-.analytics-entry:first-child { padding-top: 8px; }
+.analytics-entry:first-child { padding-top: 16px; }
 .analytics-entry:last-child { border-bottom: 0; }
 
 .analytics-row-top {
@@ -1043,10 +1049,10 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  border-bottom: 2px solid var(--border-strong);
+  border-bottom: 1px solid var(--border);
   padding: 13.5px 2px;
 }
-.tax-entry:first-child { padding-top: 4.5px; }
+.tax-entry:first-child { padding-top: 11px; }
 .tax-entry:last-child { border-bottom: 0; }
 .tax-entry > .tax-row-top {
   display: flex;
@@ -1060,6 +1066,11 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   gap: 10px;
   align-items: end;
   margin-top: 14px;
+}
+.tax-entry .analytics-metric-mid {
+  justify-self: center;
+  text-align: left;
+  max-width: 100%;
 }
 .tax-entry .tax-pnl {
   font-size: 14px;
@@ -1462,6 +1473,7 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
 
   .summary-strip { padding: 15px 14px; gap: 10px; border-radius: 16px; }
   .holdings-panel { padding: 15px 14px 6px; border-radius: 18px; }
+  .holdings-panel.list-panel { margin-top: 16px; }
 
   .holding-name, .holding-value strong,
   .analytics-metric strong { font-size: 13.5px; }
@@ -1470,7 +1482,9 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .analytics-metric .analytics-pnl-pct { font-size: 11.66px; }
   .analytics-metric span { font-size: 11.13px; }
   .analytics-entry { padding: 22px 2px; }
+  .analytics-entry:first-child { padding-top: 14px; }
   .tax-entry { padding: 12px 2px; }
+  .tax-entry:first-child { padding-top: 9px; }
   .tax-entry .tax-pnl { font-size: 13.5px; }
 
   .page-heading { padding: 20px 0 16px; }

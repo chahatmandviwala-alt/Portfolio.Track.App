@@ -37,7 +37,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css?v=19">
-  <link rel="stylesheet" href="/static/theme.css?v=23">
+  <link rel="stylesheet" href="/static/theme.css?v=24">
   <link rel="stylesheet" href="/static/logo.css?v=2">
   <script>
     // Keep the mobile browser's theme color in sync with the user's appearance setting.
@@ -233,8 +233,15 @@
             <div id="capital-chart" class="capital-chart" role="group" aria-label="Interactive capital allocation treemap showing each asset by base-currency market value"></div>
             <div class="capital-meta"><span id="capital-scope">Market value in base currency</span><span id="capital-hint">Select a tile to expand</span></div>
           </div>
-          <div class="section-heading analytics-heading"><div><p class="eyebrow">DETAILED VIEW</p></div><span id="analytics-n" class="hint-tag"></span></div>
-          <div class="holdings-list analytics-list" id="analytics-holdings"></div>
+          <div class="holdings-panel list-panel">
+            <div class="section-heading holdings-panel-head">
+              <div class="section-title-group">
+                <p class="eyebrow">DETAILED VIEW</p>
+              </div>
+              <span id="analytics-n" class="hint-tag"></span>
+            </div>
+            <div class="holdings-list analytics-list" id="analytics-holdings"></div>
+          </div>
         </section>
 
         <section id="view-trade" class="view" aria-label="Add a trade">
@@ -298,8 +305,15 @@
             <div class="tax-total"><span>NET REALIZED P/L</span><strong id="tax-value">—</strong><small id="tax-dates">—</small></div>
             <button id="tax-export" class="outline-btn full" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m-5-5 5 5 5-5M4 17v3h16v-3"/></svg>Export realized P/L CSV</button>
           </div>
-          <div class="section-heading"><div><p class="eyebrow">CLOSED POSITIONS</p></div><span id="tax-count" class="hint-tag"></span></div>
-          <div id="tax-list" class="holdings-list tax-list"></div>
+          <div class="holdings-panel list-panel">
+            <div class="section-heading holdings-panel-head">
+              <div class="section-title-group">
+                <p class="eyebrow">CLOSED POSITIONS</p>
+              </div>
+              <span id="tax-count" class="hint-tag"></span>
+            </div>
+            <div id="tax-list" class="holdings-list tax-list"></div>
+          </div>
           <p id="tax-note" class="footnote">FIFO calculations are informational and not tax advice.</p>
         </section>
 
