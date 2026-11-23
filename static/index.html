@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#090b0e">
-  <meta name="description" content="Track your investments beautifully, in one place, privately.">
+  <meta name="description" content="Track your investments and multi-currency cash beautifully, in one place, privately.">
   <title>Track — All your investments, one place.</title>
   <link id="app-favicon" rel="icon" type="image/png" href="/static/logos/logo.png">
   <link rel="apple-touch-icon" href="/static/logos/logo.png">
@@ -36,11 +36,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css?v=19">
-  <link rel="stylesheet" href="/static/theme.css?v=27">
+  <link rel="stylesheet" href="/static/styles.css?v=20">
+  <link rel="stylesheet" href="/static/theme.css?v=28">
   <link rel="stylesheet" href="/static/logo.css?v=2">
   <script>
-    // Keep the mobile browser's theme color in sync with the user's appearance setting.
     (() => {
       const root = document.documentElement;
       const themeMeta = document.querySelector('meta[name="theme-color"]');
@@ -55,8 +54,6 @@
     })();
   </script>
   <script>
-    // Show a compact date string while retaining real, accessible native pickers.
-    // This avoids the minimum intrinsic width of iOS Safari's date/time controls.
     document.addEventListener('DOMContentLoaded', () => {
       const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -83,15 +80,15 @@
         input.addEventListener('input', () => renderPicker(input));
         input.addEventListener('change', () => renderPicker(input));
       }
-      for (const formId of ['trade-form', 'edit-form']) {
+      for (const formId of ['trade-form', 'edit-form', 'edit-cash-form']) {
         document.getElementById(formId)?.addEventListener('reset', () => requestAnimationFrame(sync));
       }
-      // The app fills the edit form programmatically before opening the dialog.
-      const dialog = document.getElementById('edit-dialog');
-      if (dialog) new MutationObserver(sync).observe(dialog, {
-        attributes: true, attributeFilter: ['open']
-      });
-      // The app can also fill the new-trade date before its view becomes active.
+      for (const dialogId of ['edit-dialog', 'edit-cash-dialog']) {
+        const dialog = document.getElementById(dialogId);
+        if (dialog) new MutationObserver(sync).observe(dialog, {
+          attributes: true, attributeFilter: ['open']
+        });
+      }
       const tradeView = document.getElementById('view-trade');
       if (tradeView) new MutationObserver(sync).observe(tradeView, {
         attributes: true, attributeFilter: ['class']
@@ -100,7 +97,7 @@
     });
   </script>
   <script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-  <script defer src="/static/app.js?v=22"></script>
+  <script defer src="/static/app.js?v=28"></script>
 </head>
 <body>
   <div class="ambient ambient-left"></div><div class="ambient ambient-right"></div>
@@ -135,7 +132,7 @@
         </div>
       </div>
       <nav class="sidebar-nav" aria-label="Primary navigation">
-        <button type="button" class="nav-btn side-nav-btn active" data-tab="home" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V10Z"/><path d="M9 21v-7h6v7"/></svg><span>Home</span></button>
+        <button type="button" class="nav-btn side-nav-btn active" data-tab="home" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V10Z"/><path d="M9 21v-7h6v7"/></svg><span>Dashboard</span></button>
         <button type="button" class="nav-btn side-nav-btn" data-tab="analytics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg><span>Analytics</span></button>
         <button type="button" class="nav-btn side-nav-btn" data-tab="trade"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span>New trade</span></button>
         <button type="button" class="nav-btn side-nav-btn" data-tab="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-7M3 3v5h5"/><path d="M12 7v5l3.5 2.5"/></svg><span>History</span></button>
@@ -168,41 +165,50 @@
       </header>
 
       <div class="main-wrap">
-        <section id="view-home" class="view active" aria-label="Portfolio home">
-          <div class="home-bento">
+        <section id="view-home" class="view active" aria-label="Dashboard">
+          <div class="home-hero-wrap">
             <div class="hero">
               <div class="eyebrow-row">
-                <span class="eyebrow">TOTAL PORTFOLIO VALUE</span>
-                <button id="refresh-btn" type="button" class="refresh-icon" title="Refresh market prices" aria-label="Refresh market prices">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg>
-                  <span class="refresh-label">Refresh</span>
-                </button>
+                <span id="hero-title" class="eyebrow">INVESTMENTS</span>
+                <div class="hero-header-actions">
+                  <div class="chart-mode-switch" role="group" aria-label="Select dashboard chart">
+                    <button type="button" class="chart-mode-btn active" data-dash-mode="investments" title="Investments" aria-label="Investments development" aria-pressed="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V14"/><path d="M10 20V8"/><path d="M16 20V11"/><path d="M22 20V4"/></svg>
+                    </button>
+                    <button type="button" class="chart-mode-btn" data-dash-mode="cash" title="Cash" aria-label="Cash development" aria-pressed="false">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2h-4.5a2.5 2.5 0 0 0 0 5H20v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M20 11.5h-4.5a.5.5 0 0 0 0 1H20v-1Z"/></svg>
+                    </button>
+                    <button type="button" class="chart-mode-btn chart-mode-nav" data-dash-mode="nav" title="Net Asset Value" aria-label="Net Asset Value development" aria-pressed="false">
+                      <span>NAV</span>
+                    </button>
+                  </div>
+                  <button id="refresh-btn" type="button" class="refresh-icon" title="Refresh market prices & FX" aria-label="Refresh market prices and FX">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg>
+                    <span class="refresh-label">Refresh</span>
+                  </button>
+                </div>
               </div>
               <div class="balance-row"><h1 id="total-value" class="total-value">—</h1><span class="currency-pill" id="hero-ccy">SEK</span></div>
               <div id="main-change" class="change-line"><span class="pnl-pill">—</span></div>
-              <div class="chart-section"><div id="history-chart" class="history-chart" role="img" aria-label="Portfolio development over time"></div><div id="history-loading" class="chart-wait hidden"><span class="spinner"></span> Building portfolio history…</div></div>
+              <div class="chart-section"><div id="history-chart" class="history-chart" role="img" aria-label="Portfolio development over time"></div><div id="history-loading" class="chart-wait hidden"><span class="spinner"></span> Building development history…</div></div>
               <div class="range-row" id="ranges"><button class="selected" data-range="1M">1M</button><button data-range="3M">3M</button><button data-range="6M">6M</button><button data-range="1Y">1Y</button><button data-range="3Y">3Y</button><button data-range="MAX">MAX</button></div>
-            </div>
-
-            <div class="summary-strip" aria-label="Portfolio key metrics">
-              <div class="summary-card">
-                <span>Invested</span>
-                <strong id="invested-value">—</strong>
-              </div>
-              <div class="summary-divider"></div>
-              <div class="summary-card">
-                <span>Unrealized P/L</span>
-                <strong id="unrealized-value">—</strong>
-              </div>
-              <div class="summary-divider"></div>
-              <div class="summary-card">
-                <span>Holdings</span>
-                <strong id="holdings-count">—</strong>
-              </div>
             </div>
           </div>
 
-          <div class="holdings-panel">
+          <div class="holdings-panel cash-balances-panel">
+            <div class="section-heading holdings-panel-head">
+              <div class="section-title-group">
+                <p class="eyebrow cash-eyebrow">
+                  <svg class="eyebrow-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2h-4.5a2.5 2.5 0 0 0 0 5H20v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><circle cx="16.5" cy="12" r="0.8" fill="currentColor"/></svg>
+                  <span>CASH BALANCES</span>
+                </p>
+              </div>
+              <button class="text-link" type="button" id="cash-see-all">Details →</button>
+            </div>
+            <div id="main-cash-balances" class="holdings-list"></div>
+          </div>
+
+          <div class="holdings-panel list-panel">
             <div class="section-heading holdings-panel-head">
               <div class="section-title-group">
                 <p class="eyebrow">ASSETS <span class="section-count" id="holdings-badge">0</span></p>
@@ -224,66 +230,164 @@
         </section>
 
         <section id="view-analytics" class="view" aria-label="Analytics">
-          <div class="page-heading"><h1>Portfolio <em>analytics.</em></h1></div>
-          <div class="section-card allocation-card">
-            <div class="card-top capital-header">
-              <div><p class="eyebrow">PORTFOLIO COMPOSITION</p></div>
-              <button id="capital-reset" class="capital-reset hidden" type="button" aria-label="Return to full capital allocation">← All assets</button>
+          <div class="page-heading analytics-page-head">
+            <h1>Portfolio <em>analytics.</em></h1>
+            <div class="view-mode-switch" role="tablist" aria-label="Analytics view">
+              <button type="button" class="mode-tab active" role="tab" aria-selected="true" data-analytics-mode="investments">Investments</button>
+              <button type="button" class="mode-tab" role="tab" aria-selected="false" data-analytics-mode="cash">Cash</button>
+              <button type="button" class="mode-tab" role="tab" aria-selected="false" data-analytics-mode="nav">Net Asset Value</button>
             </div>
-            <div id="capital-chart" class="capital-chart" role="group" aria-label="Interactive capital allocation treemap showing each asset by base-currency market value"></div>
-            <div class="capital-meta"><span id="capital-scope">Market value in base currency</span><span id="capital-hint">Select a tile to expand</span></div>
           </div>
-          <div class="holdings-panel list-panel">
-            <div class="section-heading holdings-panel-head">
-              <div class="section-title-group">
-                <p class="eyebrow">DETAILED VIEW</p>
+
+          <div id="analytics-pane-investments" class="analytics-pane">
+            <div class="section-card allocation-card">
+              <div class="card-top capital-header">
+                <div><p class="eyebrow">PORTFOLIO COMPOSITION</p></div>
+                <button id="capital-reset" class="capital-reset hidden" type="button" aria-label="Return to full capital allocation">← All assets</button>
               </div>
-              <span id="analytics-n" class="hint-tag"></span>
+              <div id="capital-chart" class="capital-chart" role="group" aria-label="Interactive capital allocation treemap showing each asset by base-currency market value"></div>
+              <div class="capital-meta"><span id="capital-scope">Market value in base currency</span><span id="capital-hint">Select a tile to expand</span></div>
             </div>
-            <div class="holdings-list analytics-list" id="analytics-holdings"></div>
+            <div class="holdings-panel list-panel">
+              <div class="section-heading holdings-panel-head">
+                <div class="section-title-group">
+                  <p class="eyebrow">DETAILED VIEW</p>
+                </div>
+                <span id="analytics-n" class="hint-tag"></span>
+              </div>
+              <div class="holdings-list analytics-list" id="analytics-holdings"></div>
+            </div>
+          </div>
+
+          <div id="analytics-pane-cash" class="analytics-pane hidden">
+            <div class="section-card cash-kpi-card">
+              <div class="cash-kpi-grid">
+                <div class="cash-kpi-cell">
+                  <span class="eyebrow">TOTAL CASH</span>
+                  <strong id="cash-analytics-total" class="cash-kpi-value">—</strong>
+                </div>
+                <div class="cash-kpi-divider"></div>
+                <div class="cash-kpi-cell">
+                  <span class="eyebrow">UNREALIZED P/L</span>
+                  <strong id="cash-analytics-pnl" class="cash-kpi-value">—</strong>
+                </div>
+              </div>
+            </div>
+
+            <div class="section-card exposure-card">
+              <div class="card-top">
+                <div><p class="eyebrow">CURRENCY EXPOSURE</p></div>
+                <span id="cash-exposure-count" class="hint-tag"></span>
+              </div>
+              <div class="exposure-layout">
+                <div id="cash-exposure-chart" class="donut-chart" role="img" aria-label="Currency exposure donut chart"></div>
+                <div id="cash-exposure-list" class="exposure-list"></div>
+              </div>
+            </div>
+
+            <div class="holdings-panel list-panel">
+              <div class="section-heading holdings-panel-head">
+                <div class="section-title-group">
+                  <p class="eyebrow">CURRENCIES IN DETAIL</p>
+                </div>
+                <span id="cash-detail-n" class="hint-tag"></span>
+              </div>
+              <div class="holdings-list analytics-list" id="cash-detail-list"></div>
+            </div>
+          </div>
+
+          <div id="analytics-pane-nav" class="analytics-pane hidden">
+            <div class="section-card nav-allocation-card">
+              <div class="card-top nav-alloc-head">
+                <div class="section-title-group">
+                  <p class="eyebrow">ALLOCATION</p>
+                  <span class="info-badge" title="Combined market value of Investments and Cash in your base currency" aria-label="Combined market value of Investments and Cash in your base currency">i</span>
+                </div>
+              </div>
+              <div class="nav-alloc-layout">
+                <div class="nav-donut-wrap">
+                  <div id="nav-allocation-chart" class="nav-donut-chart" role="img" aria-label="Net worth allocation between investments and cash"></div>
+                  <div class="nav-donut-center" aria-hidden="true">
+                    <strong id="nav-donut-total">—</strong>
+                    <span>Net worth</span>
+                  </div>
+                </div>
+                <div id="nav-allocation-legend" class="nav-alloc-legend"></div>
+              </div>
+            </div>
+
+            <div class="holdings-panel list-panel">
+              <div class="section-heading holdings-panel-head">
+                <div class="section-title-group">
+                  <p class="eyebrow">NET WORTH BREAKDOWN</p>
+                </div>
+                <span id="nav-breakdown-ccy" class="hint-tag">SEK</span>
+              </div>
+              <div id="nav-breakdown-list" class="holdings-list analytics-list"></div>
+            </div>
           </div>
         </section>
 
         <section id="view-trade" class="view" aria-label="Add a trade">
           <div class="page-heading"><h1>New <em>trade.</em></h1></div>
           <div class="section-card form-card">
-            <div class="buy-sell"><button type="button" id="side-buy" class="selected" data-side="BUY">Buy</button><button type="button" id="side-sell" data-side="SELL">Sell</button></div>
+            <div id="trade-side-toggle" class="buy-sell">
+              <button type="button" id="side-buy" class="selected" data-side="BUY">Buy</button>
+              <button type="button" id="side-sell" data-side="SELL">Sell</button>
+            </div>
+            <div id="cash-type-toggle" class="buy-sell cash-txn-toggle hidden">
+              <button type="button" class="selected" data-cash-type="Credit">Credit</button>
+              <button type="button" data-cash-type="Debit">Debit</button>
+              <button type="button" data-cash-type="Buy">FX Buy</button>
+              <button type="button" data-cash-type="Sell">FX Sell</button>
+            </div>
             <form id="trade-form">
               <div class="field-grid">
-                <label>Asset name <input name="asset" placeholder="e.g. APPLE" required></label>
-                <label>Ticker (yFinance) <input name="ticker" placeholder="e.g. AAPL"></label>
-                <label>Trade date <span class="date-input-wrap"><span class="date-display" aria-hidden="true">Select date</span><input type="date" name="trade_date" required></span></label>
-                <label>Asset class <select name="asset_type"><option>Stock</option><option>Fund</option><option>ETF</option><option>Crypto</option></select></label>
-                <label>Quantity <input type="number" name="quantity" min="0.00000001" step="any" placeholder="0.00" required></label>
-                <label>Price per unit <input type="number" name="price_trade_ccy" min="0" step="any" placeholder="0.00" required></label>
-                <label>Trade currency <input name="trade_ccy" value="USD" maxlength="4" required placeholder="USD"></label>
-                <label>Fees / brokerage <input type="number" name="charges_trade_ccy" min="0" step="any" value="0"></label>
-                <label>Tax / STT <input type="number" name="stt_trade_ccy" min="0" step="any" value="0"></label>
+                <label><span id="lbl-asset">Asset name</span> <input name="asset" placeholder="e.g. APPLE" required></label>
+                <label><span id="lbl-ticker">Ticker (yFinance)</span> <input name="ticker" placeholder="e.g. AAPL"></label>
+                <label><span id="lbl-date">Trade date</span> <span class="date-input-wrap"><span class="date-display" aria-hidden="true">Select date</span><input type="date" name="trade_date" required></span></label>
+                <label>Asset class <select name="asset_type" id="trade-asset-type"><option value="Stock">Stock</option><option value="Fund">Fund</option><option value="ETF">ETF</option><option value="Crypto">Crypto</option><option value="Cash">Cash</option></select></label>
+                <label><span id="lbl-quantity">Quantity</span> <input type="number" name="quantity" min="0.00000001" step="any" placeholder="0.00" required></label>
+                <label><span id="lbl-price">Price per unit</span> <input type="number" name="price_trade_ccy" min="0" step="any" placeholder="0.00" required></label>
+                <label><span id="lbl-ccy">Trade currency</span> <input name="trade_ccy" value="USD" maxlength="4" required placeholder="USD"></label>
+                <label><span id="lbl-fees">Fees / brokerage</span> <input type="number" name="charges_trade_ccy" min="0" step="any" value="0"></label>
+                <label><span id="lbl-stt">Tax / STT</span> <input type="number" name="stt_trade_ccy" min="0" step="any" value="0"></label>
                 <label>FX to <span class="base-label">SEK</span> <input id="trade-manual-fx" type="number" name="fx_to_base" min="0.000000001" step="any" value="1" disabled></label>
               </div>
               <label class="toggle-label"><span><b>Automatic exchange rate</b></span><input id="trade-auto-fx" type="checkbox" checked><span class="switch"></span></label>
-              <div id="trade-total" class="trade-preview"><span>Trade value (excluding fees)</span><strong>—</strong></div>
-              <button type="submit" class="primary-btn full">Save trade</button>
+              <div id="trade-total" class="trade-preview"><span id="trade-preview-label">Trade value (excluding fees)</span><strong>—</strong></div>
+              <button type="submit" id="trade-submit-btn" class="primary-btn full">Save trade</button>
             </form>
           </div>
         </section>
 
         <section id="view-history" class="view" aria-label="Trade history">
-          <div class="page-heading"><h1>Trade <em>history.</em></h1></div>
+          <div class="page-heading analytics-page-head">
+            <h1>Transaction <em>history.</em></h1>
+            <div class="view-mode-switch" role="tablist" aria-label="History type">
+              <button type="button" class="mode-tab active" role="tab" aria-selected="true" data-history-mode="trades">Trades</button>
+              <button type="button" class="mode-tab" role="tab" aria-selected="false" data-history-mode="cash">Cash</button>
+            </div>
+          </div>
           <div class="history-toolbar">
             <div class="search-row">
               <div class="search-field">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.8" cy="10.8" r="6.5"/><path d="m16 16 5 5"/></svg>
-                <input id="history-search" placeholder="Search assets, symbols, currency…" aria-label="Search trade history">
+                <input id="history-search" placeholder="Search assets, symbols, currency…" aria-label="Search transaction history">
                 <button id="history-search-clear" type="button" class="search-clear hidden" aria-label="Clear search">✕</button>
               </div>
               <span id="trade-count" class="count-tag">0 trades</span>
             </div>
             <div class="history-filters">
-              <div class="sort-pills" role="group" aria-label="Filter by trade side">
+              <div id="trades-side-filters" class="sort-pills" role="group" aria-label="Filter by trade side">
                 <button type="button" class="sort-pill active" data-side-filter="ALL">All</button>
                 <button type="button" class="sort-pill" data-side-filter="BUY">Buys</button>
                 <button type="button" class="sort-pill" data-side-filter="SELL">Sells</button>
+              </div>
+              <div id="cash-side-filters" class="sort-pills hidden" role="group" aria-label="Filter cash transactions">
+                <button type="button" class="sort-pill active" data-cash-filter="ALL">All</button>
+                <button type="button" class="sort-pill" data-cash-filter="IN">Inflow</button>
+                <button type="button" class="sort-pill" data-cash-filter="OUT">Outflow</button>
               </div>
               <p class="list-hint">Tap a transaction to edit or delete it</p>
             </div>
@@ -291,7 +395,7 @@
           <div class="trades-surface">
             <div id="trades-list" class="trades-list"></div>
           </div>
-          <button id="load-more-trades" class="outline-btn full hidden" type="button">Load more trades</button>
+          <button id="load-more-trades" class="outline-btn full hidden" type="button">Load more</button>
         </section>
 
         <section id="view-tax" class="view" aria-label="Tax and realized profit or loss">
@@ -314,7 +418,7 @@
             </div>
             <div id="tax-list" class="holdings-list tax-list"></div>
           </div>
-          <p id="tax-note" class="footnote">FIFO calculations are informational and not tax advice.</p>
+          <p id="tax-note" class="footnote">FIFO and FX average-cost calculations are informational and not tax advice.</p>
         </section>
 
         <section id="view-account" class="view" aria-label="Account and settings">
@@ -333,8 +437,10 @@
               <div class="account-section">
                 <p class="eyebrow">YOUR DATA</p>
                 <div class="settings-box">
-                  <label class="file-row" for="file-import"><span class="setting-icon">↑</span><span><strong>Upload / replace portfolio</strong><small>Import your existing trades CSV</small></span><span class="chevron">›</span><input type="file" accept=".csv,text/csv" id="file-import" class="visually-hidden"></label>
-                  <button id="file-export" class="file-row" type="button"><span class="setting-icon">↓</span><span><strong>Download portfolio</strong><small>Export compatible CSV</small></span><span class="chevron">›</span></button>
+                  <label class="file-row" for="file-import"><span class="setting-icon">↑</span><span><strong>Upload / replace trades</strong><small>Import your trades CSV</small></span><span class="chevron">›</span><input type="file" accept=".csv,text/csv" id="file-import" class="visually-hidden"></label>
+                  <button id="file-export" class="file-row" type="button"><span class="setting-icon">↓</span><span><strong>Download trades</strong><small>Export portfolio_trades.csv</small></span><span class="chevron">›</span></button>
+                  <label class="file-row" for="cash-file-import"><span class="setting-icon">↑</span><span><strong>Upload / replace cash</strong><small>Import your cash_txns.csv</small></span><span class="chevron">›</span><input type="file" accept=".csv,text/csv" id="cash-file-import" class="visually-hidden"></label>
+                  <button id="cash-file-export" class="file-row" type="button"><span class="setting-icon">↓</span><span><strong>Download cash</strong><small>Export cash_txns.csv</small></span><span class="chevron">›</span></button>
                 </div>
               </div>
               <div class="account-section">
@@ -352,7 +458,7 @@
       </div>
 
       <nav class="bottom-nav" aria-label="Main navigation">
-        <button type="button" class="nav-btn active" data-tab="home" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V10Z"/><path d="M9 21v-7h6v7"/></svg><span>Home</span></button>
+        <button type="button" class="nav-btn active" data-tab="home" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V10Z"/><path d="M9 21v-7h6v7"/></svg><span>Dashboard</span></button>
         <button type="button" class="nav-btn" data-tab="analytics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg><span>Analytics</span></button>
         <button type="button" class="nav-btn" data-tab="trade"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span>New trade</span></button>
         <button type="button" class="nav-btn" data-tab="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-7M3 3v5h5"/><path d="M12 7v5l3.5 2.5"/></svg><span>History</span></button>
@@ -363,5 +469,22 @@
   </div>
 
   <dialog id="edit-dialog" class="edit-dialog"><form id="edit-form"><div class="dialog-top"><div><p class="eyebrow">EDIT TRANSACTION</p></div><button class="x-btn" type="button" id="close-dialog" aria-label="Close">✕</button></div><div class="field-grid"><label>Asset <input name="asset" required></label><label>Ticker <input name="ticker"></label><label class="datetime-field">Trade date / time <span class="date-input-wrap"><span class="date-display" aria-hidden="true">Select date &amp; time</span><input name="trade_date" type="datetime-local" required></span></label><label>Type <select name="asset_type"><option>Stock</option><option>Fund</option><option>ETF</option><option>Crypto</option></select></label><label>Side <select name="side"><option>BUY</option><option>SELL</option></select></label><label>Quantity <input name="quantity" type="number" min="0.00000001" step="any" required></label><label>Unit price <input name="price_trade_ccy" type="number" min="0" step="any" required></label><label>Currency <input name="trade_ccy" required></label><label>Fees <input name="charges_trade_ccy" type="number" min="0" step="any"></label><label>Tax / STT <input name="stt_trade_ccy" type="number" min="0" step="any"></label><label>FX to base <input name="fx_to_base" type="number" min="0.000001" step="any" required></label><label>Last price (trade CCY) <input name="last_price_trade_ccy" type="number" min="0" step="any"></label></div><div class="dialog-buttons"><button id="delete-trade" type="button" class="danger-btn">Delete</button><button type="submit" class="primary-btn">Save changes</button></div></form></dialog>
+
+  <dialog id="edit-cash-dialog" class="edit-dialog"><form id="edit-cash-form"><div class="dialog-top"><div><p class="eyebrow">EDIT CASH TRANSACTION</p></div><button class="x-btn" type="button" id="close-cash-dialog" aria-label="Close">✕</button></div><div class="field-grid"><label>Date <span class="date-input-wrap"><span class="date-display" aria-hidden="true">Select date</span><input name="date" type="date" required></span></label><label>Currency <input name="foreign_ccy" maxlength="4" required></label><label>Transaction type <select name="txn_type"><option value="Credit">Credit</option><option value="Debit">Debit</option><option value="Buy">FX Buy</option><option value="Sell">FX Sell</option></select></label><label>Amount <input name="foreign_amount" type="number" min="0.00000001" step="any" required></label><label>FX rate to <span class="base-label">SEK</span> <input name="fx_rate" type="number" min="0.000001" step="any" required></label><label>Exchange fee <input name="fee_foreign" type="number" min="0" step="any" value="0"></label><label class="wide">Memo / Note <input name="memo" maxlength="200" placeholder="Optional note"></label></div><div class="dialog-buttons"><button id="delete-cash-txn" type="button" class="danger-btn">Delete</button><button type="submit" class="primary-btn">Save changes</button></div></form></dialog>
+
+  <dialog id="cash-sync-dialog" class="edit-dialog cash-sync-dialog">
+    <div class="cash-sync-body">
+      <div class="dialog-top">
+        <div><p class="eyebrow">REGISTER IN CASH ACCOUNT?</p></div>
+        <button class="x-btn" type="button" id="close-cash-sync" aria-label="Close">✕</button>
+      </div>
+      <p class="cash-sync-copy" id="cash-sync-summary">Would you like to register the matching transaction in your cash account?</p>
+      <div class="cash-sync-details" id="cash-sync-details"></div>
+      <div class="dialog-buttons">
+        <button id="cash-sync-skip" type="button" class="outline-btn">No, skip</button>
+        <button id="cash-sync-confirm" type="button" class="primary-btn">Yes, register cash</button>
+      </div>
+    </div>
+  </dialog>
 </body>
 </html>

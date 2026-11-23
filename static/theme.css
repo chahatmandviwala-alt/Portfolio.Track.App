@@ -1547,3 +1547,499 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .asset-logo-image { transition: none; }
   .capital-tile { transition: none !important; }
 }
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Cash & Net Asset Value Integration Styles
+   ───────────────────────────────────────────────────────────────────────── */
+
+.home-hero-wrap {
+  margin: 18px 0 18px;
+}
+.hero-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.chart-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+}
+.chart-mode-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--subtle);
+  height: 28px;
+  min-width: 32px;
+  padding: 0 8px;
+  border-radius: 100px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.chart-mode-btn svg { width: 15px; height: 15px; }
+.chart-mode-btn:hover { color: var(--text); background: var(--panel-hover); }
+.chart-mode-btn.active {
+  background: var(--surface);
+  color: var(--accent);
+  border-color: var(--border-strong);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .14);
+}
+html[data-theme="light"] .chart-mode-btn.active {
+  box-shadow: 0 1px 3px rgba(42, 34, 20, .10);
+}
+.chart-mode-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Cash Balances Card on Dashboard */
+.cash-balances-panel {
+  margin-bottom: 18px;
+}
+.cash-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.eyebrow-wallet {
+  width: 16px;
+  height: 16px;
+  color: var(--subtle);
+  flex-shrink: 0;
+}
+
+/* Circular Currency Flag Icons */
+.flag-icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .16);
+}
+.flag-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.flag-icon.flag-sm {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+}
+.flag-fallback {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+.cash-row {
+  cursor: default;
+}
+.cash-row .holding-value span.cash-base-eq {
+  color: var(--subtle);
+  font-weight: 500;
+}
+
+/* Analytics & History Segmented Mode Switcher */
+.analytics-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.view-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  box-shadow: var(--card-shadow);
+}
+.mode-tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--subtle);
+  padding: 8px 14px;
+  border-radius: 9px;
+  font-size: 12.72px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.mode-tab:hover { color: var(--text); }
+.mode-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(88, 227, 251, .18);
+}
+html[data-theme="light"] .mode-tab.active {
+  border-color: rgba(27, 127, 179, .2);
+}
+
+/* Cash Analytics KPI Card */
+.cash-kpi-card {
+  padding: 22px 26px;
+  margin-bottom: 18px;
+}
+.cash-kpi-grid {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.cash-kpi-cell {
+  flex: 1;
+  min-width: 0;
+}
+.cash-kpi-cell .eyebrow {
+  display: block;
+  margin-bottom: 6px;
+}
+.cash-kpi-value {
+  display: block;
+  font-size: clamp(22px, 3vw, 28px);
+  font-weight: 700;
+  letter-spacing: -.035em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.cash-kpi-value.positive { color: var(--positive); }
+.cash-kpi-value.negative { color: var(--negative); }
+.cash-kpi-divider {
+  width: 1px;
+  height: 44px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* Cash Currency Exposure Donut Card */
+.exposure-card {
+  padding: 24px;
+}
+.exposure-layout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  margin-top: 12px;
+}
+.donut-chart {
+  width: 100%;
+  max-width: 280px;
+  height: 230px;
+}
+.exposure-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.exposure-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.exposure-row:last-child { border-bottom: 0; }
+.exposure-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.exposure-info {
+  flex: 1;
+  min-width: 0;
+}
+.exposure-info strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.exposure-info span {
+  display: block;
+  font-size: 11.66px;
+  color: var(--subtle);
+}
+.exposure-vals {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.exposure-vals strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text);
+}
+.exposure-vals span {
+  display: block;
+  font-size: 11.66px;
+  color: var(--subtle);
+}
+
+/* Cash Detail Rows */
+.cash-detail-entry .analytics-metric-mid {
+  justify-self: center;
+  text-align: left;
+  max-width: 100%;
+}
+.cash-detail-right {
+  text-align: right;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cash-detail-right strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.cash-detail-right span {
+  display: block;
+  font-size: 12.19px;
+  color: var(--subtle);
+  margin-top: 2px;
+}
+
+/* NAV Allocation Card */
+.nav-allocation-card {
+  padding: 24px 26px;
+}
+.nav-alloc-head .eyebrow { margin: 0; }
+.info-badge {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--subtle);
+  color: var(--subtle);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
+  line-height: 1;
+  cursor: help;
+}
+.nav-alloc-layout {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  margin-top: 18px;
+}
+.nav-donut-wrap {
+  position: relative;
+  width: 210px;
+  height: 210px;
+  flex-shrink: 0;
+}
+.nav-donut-chart {
+  width: 100%;
+  height: 100%;
+}
+.nav-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+  padding: 0 22px;
+}
+.nav-donut-center strong {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -.03em;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.nav-donut-center span {
+  font-size: 12px;
+  color: var(--subtle);
+  margin-top: 3px;
+}
+.nav-alloc-legend {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.nav-legend-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 0;
+}
+.nav-legend-item + .nav-legend-item {
+  border-top: 1px solid var(--border);
+}
+.nav-legend-left {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-width: 0;
+}
+.nav-legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3.5px;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+.nav-legend-left strong {
+  display: block;
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--text);
+}
+.nav-legend-left span {
+  display: block;
+  font-size: 13px;
+  color: var(--subtle);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.nav-legend-pct {
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--text);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* NAV Breakdown Rows */
+.nav-breakdown-entry .analytics-metric-mid {
+  justify-self: center;
+  text-align: left;
+  max-width: 100%;
+}
+.nav-breakdown-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 3.5px;
+  flex-shrink: 0;
+}
+
+/* New Trade Cash Transaction Toggle */
+.cash-txn-toggle button.selected[data-cash-type="Credit"],
+.cash-txn-toggle button.selected[data-cash-type="Buy"] {
+  background: var(--positive-soft);
+  color: var(--positive);
+}
+.cash-txn-toggle button.selected[data-cash-type="Debit"],
+.cash-txn-toggle button.selected[data-cash-type="Sell"] {
+  background: var(--red-soft);
+  color: var(--negative);
+}
+
+/* Cash Sync Confirmation Dialog */
+.cash-sync-dialog {
+  width: min(440px, calc(100vw - 24px));
+}
+.cash-sync-body {
+  padding: 24px;
+}
+.cash-sync-copy {
+  margin: 0 0 16px;
+  color: var(--subtle);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.cash-sync-details {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.cash-sync-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.cash-sync-row span { color: var(--subtle); }
+.cash-sync-row strong {
+  color: var(--text);
+  font-weight: 650;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.cash-sync-row strong.buy { color: var(--positive); }
+.cash-sync-row strong.sell { color: var(--negative); }
+.cash-sync-dialog .dialog-buttons {
+  margin-top: 20px;
+}
+.cash-sync-dialog .dialog-buttons button {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (min-width: 960px) {
+  .home-hero-wrap { margin: 0 0 22px; }
+  .exposure-layout {
+    flex-direction: row;
+    align-items: center;
+    gap: 28px;
+  }
+  .donut-chart {
+    width: 240px;
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 700px) {
+  .home-hero-wrap { margin: 14px 0 16px; }
+  .cash-balances-panel { margin-bottom: 16px; }
+  .hero-header-actions { gap: 6px; }
+  .chart-mode-btn { height: 26px; min-width: 28px; padding: 0 6px; font-size: 10.5px; }
+  .chart-mode-btn svg { width: 14px; height: 14px; }
+  .view-mode-switch { width: 100%; }
+  .mode-tab { flex: 1; text-align: center; padding: 8px 8px; font-size: 12.19px; }
+  .cash-kpi-card { padding: 18px 16px; }
+  .cash-kpi-grid { gap: 14px; }
+  .exposure-card { padding: 18px 16px; }
+  .nav-allocation-card { padding: 18px 16px; }
+  .nav-alloc-layout {
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+  .nav-alloc-legend { width: 100%; }
+  .flag-icon { width: 38px; height: 38px; flex-basis: 38px; }
+  .cash-detail-right strong { font-size: 13.5px; }
+  .cash-detail-right span { font-size: 11.66px; }
+  .cash-txn-toggle button { padding: 10px 4px; font-size: 12.5px; }
+}
+
+@media (max-width: 430px) {
+  .eyebrow-row { flex-wrap: wrap; row-gap: 8px; }
+  .hero-header-actions { margin-left: auto; }
+  .flag-icon { width: 36px; height: 36px; flex-basis: 36px; }
+  .cash-kpi-value { font-size: 20px; }
+}

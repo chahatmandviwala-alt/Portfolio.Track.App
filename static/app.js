@@ -1,20 +1,25 @@
-/* Track — lightweight responsive client. All portfolio calculations run in Python. */
+/* Track — lightweight responsive client for integrated Investments & Cash tracking.
+   All portfolio and cash FX calculations run in Python. */
 'use strict';
 const $ = (id) => document.getElementById(id);
 const state = {
-  user:null, dashboard:null, trades:[], history:{}, historyRevision:null,
-  historyRange:'1M', view:'home', homeSort:'value', sideFilter:'ALL',
-  tradeSide:'BUY', authMode:'login', hidden:localStorage.getItem('track-private')==='true',
-  chart:null, chartPoints:[], chartTimestamps:[], chartScrubIndex:null, capitalChart:null, capitalFocus:null,
+  user:null, dashboard:null, trades:[], cashTxns:[],
+  history:{ investments:{}, cash:{}, nav:{} },
+  historyRevisions:{ investments:null, cash:null, nav:null },
+  dashboardMode:'investments', analyticsMode:'investments', historyMode:'trades',
+  historyRange:'1M', view:'home', homeSort:'value', sideFilter:'ALL', cashFilter:'ALL',
+  tradeSide:'BUY', cashTxnType:'Credit', authMode:'login',
+  hidden:localStorage.getItem('track-private')==='true',
+  chart:null, chartPoints:[], chartTimestamps:[], chartScrubIndex:null,
+  capitalChart:null, capitalFocus:null,
+  cashDonutChart:null, navDonutChart:null,
   theme:localStorage.getItem('track-theme')==='light'?'light':'dark',
-  tradeLimit:55, editId:null, lastTax:null, busy:false
+  tradeLimit:55, editId:null, editCashId:null, pendingCashSync:null, lastTax:null, busy:false
 };
-// Deduplicate concurrent or hovered history fetches for the same (revision, span).
 const inFlightHistory = new Map();
-const icons = { Stock:'S', Fund:'F', ETF:'E', Crypto:'₿' };
-const palette = { Stock:['#25344e','#78bdf0'], Fund:['#3c3450','#c3a7ed'], ETF:['#213c4c','#81cddd'], Crypto:['#3b3447','#e2b6cf'] };
+const icons = { Stock:'S', Fund:'F', ETF:'E', Crypto:'₿', Cash:'¤' };
+const palette = { Stock:['#25344e','#78bdf0'], Fund:['#3c3450','#c3a7ed'], ETF:['#213c4c','#81cddd'], Crypto:['#3b3447','#e2b6cf'], Cash:['#1f3a36','#68d8ad'] };
 // Reference-inspired treemap: dark jewel tones alongside lighter pastel and bright tiles.
-// 40 individual hues ensure a varied palette even for larger portfolios.
 const capitalColors = [
   '#20467f','#197c85','#317552','#597785','#566977','#a9c864','#d1a43b','#a97530',
   '#553079','#78c9a8','#b87b86','#d5bba0','#79bcda','#efdfa1','#f0a783','#efe9c6',
@@ -22,12 +27,41 @@ const capitalColors = [
   '#df8f83','#5a9cbd','#4786bd','#a87943','#b63767','#8b613d','#a9bbc8','#648bd0',
   '#6a9b85','#b2a4d9','#bf7950','#8253a3','#77b7ae','#a1aa7e','#d2ad78','#718bb6'
 ];
-// Choose dark ink on light tiles and white ink on dark tiles, as in the reference image.
 function capitalInk(color){
   const rgb=[1,3,5].map(i=>parseInt(color.slice(i,i+2),16)/255);
   const linear=rgb.map(c=>c<=0.04045?c/12.92:((c+0.055)/1.055)**2.4);
   const luminance=0.2126*linear[0]+0.7152*linear[1]+0.0722*linear[2];
   return luminance>0.179?'#19202a':'#f7f8fb';
+}
+const CURRENCY_NAMES = {
+  USD:'US dollar', EUR:'Euro', CAD:'Canadian dollar', GBP:'British pound',
+  GBX:'British pence', INR:'Indian rupee', SEK:'Swedish krona', NOK:'Norwegian krone',
+  DKK:'Danish krone', CNY:'Chinese yuan', JPY:'Japanese yen', AUD:'Australian dollar',
+  KRW:'South Korean won', CHF:'Swiss franc', NZD:'New Zealand dollar',
+  SGD:'Singapore dollar', HKD:'Hong Kong dollar', PLN:'Polish zloty'
+};
+// Crisp circular SVG flags for USD, EUR, CAD, GBP, INR, SEK, NOK, DKK, CNY, JPY, AUD, KRW
+const CURRENCY_FLAGS = {
+  SEK:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#006aa7"/><rect x="18" y="0" width="11" height="64" fill="#fecc02"/><rect x="0" y="26.5" width="64" height="11" fill="#fecc02"/></svg>',
+  USD:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#fff"/><g fill="#b22234"><rect y="0" width="64" height="5"/><rect y="10" width="64" height="5"/><rect y="20" width="64" height="5"/><rect y="30" width="64" height="5"/><rect y="40" width="64" height="5"/><rect y="50" width="64" height="5"/><rect y="60" width="64" height="4"/></g><rect width="30" height="35" fill="#3c3b6e"/><g fill="#fff"><circle cx="6" cy="6" r="1.4"/><circle cx="13" cy="6" r="1.4"/><circle cx="20" cy="6" r="1.4"/><circle cx="26" cy="6" r="1.4"/><circle cx="9.5" cy="11.5" r="1.4"/><circle cx="16.5" cy="11.5" r="1.4"/><circle cx="23.5" cy="11.5" r="1.4"/><circle cx="6" cy="17" r="1.4"/><circle cx="13" cy="17" r="1.4"/><circle cx="20" cy="17" r="1.4"/><circle cx="26" cy="17" r="1.4"/><circle cx="9.5" cy="22.5" r="1.4"/><circle cx="16.5" cy="22.5" r="1.4"/><circle cx="23.5" cy="22.5" r="1.4"/><circle cx="6" cy="28" r="1.4"/><circle cx="13" cy="28" r="1.4"/><circle cx="20" cy="28" r="1.4"/><circle cx="26" cy="28" r="1.4"/></g></svg>',
+  EUR:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#003399"/><g fill="#ffcc00"><circle cx="32" cy="12" r="2.2"/><circle cx="42" cy="14.7" r="2.2"/><circle cx="49.3" cy="22" r="2.2"/><circle cx="52" cy="32" r="2.2"/><circle cx="49.3" cy="42" r="2.2"/><circle cx="42" cy="49.3" r="2.2"/><circle cx="32" cy="52" r="2.2"/><circle cx="22" cy="49.3" r="2.2"/><circle cx="14.7" cy="42" r="2.2"/><circle cx="12" cy="32" r="2.2"/><circle cx="14.7" cy="22" r="2.2"/><circle cx="22" cy="14.7" r="2.2"/></g></svg>',
+  GBP:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#012169"/><path d="M0 0L64 64M64 0L0 64" stroke="#fff" stroke-width="11"/><path d="M0 0L64 64M64 0L0 64" stroke="#c8102e" stroke-width="5"/><path d="M32 0V64M0 32H64" stroke="#fff" stroke-width="15"/><path d="M32 0V64M0 32H64" stroke="#c8102e" stroke-width="9"/></svg>',
+  CAD:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#fff"/><rect width="16" height="64" fill="#d80621"/><rect x="48" width="16" height="64" fill="#d80621"/><path d="M32 16l-2.6 7.5-4.4-2 1.8 7-6.8-1.5 2.4 4.2-2.4 1.8 6.4 4.5-1.2 3.5 5.4-.8v7.8h2.8v-7.8l5.4.8-1.2-3.5 6.4-4.5-2.4-1.8 2.4-4.2-6.8 1.5 1.8-7-4.4 2Z" fill="#d80621"/></svg>',
+  INR:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="21.5" fill="#ff9933"/><rect y="21.5" width="64" height="21" fill="#fff"/><rect y="42.5" width="64" height="21.5" fill="#138808"/><circle cx="32" cy="32" r="7" fill="none" stroke="#000080" stroke-width="1.6"/><circle cx="32" cy="32" r="1.4" fill="#000080"/><g stroke="#000080" stroke-width="0.9"><line x1="32" y1="25" x2="32" y2="39"/><line x1="25" y1="32" x2="39" y2="32"/><line x1="27" y1="27" x2="37" y2="37"/><line x1="37" y1="27" x2="27" y2="37"/></g></svg>',
+  NOK:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#ba0c2f"/><rect x="17" y="0" width="14" height="64" fill="#fff"/><rect x="0" y="25" width="64" height="14" fill="#fff"/><rect x="20.5" y="0" width="7" height="64" fill="#00205b"/><rect x="0" y="28.5" width="64" height="7" fill="#00205b"/></svg>',
+  DKK:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#c60c30"/><rect x="19" y="0" width="10" height="64" fill="#fff"/><rect x="0" y="27" width="64" height="10" fill="#fff"/></svg>',
+  CNY:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#de2910"/><polygon points="18,13 20.2,19.8 27.3,19.8 21.5,24 23.7,30.8 18,26.6 12.3,30.8 14.5,24 8.7,19.8 15.8,19.8" fill="#ffde00"/><g fill="#ffde00"><circle cx="31" cy="12" r="2.1"/><circle cx="35.5" cy="17.5" r="2.1"/><circle cx="35.5" cy="24.5" r="2.1"/><circle cx="31" cy="30" r="2.1"/></g></svg>',
+  JPY:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#fff"/><circle cx="32" cy="32" r="15.5" fill="#bc002d"/></svg>',
+  AUD:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#012169"/><rect width="32" height="32" fill="#012169"/><path d="M0 0L32 32M32 0L0 32" stroke="#fff" stroke-width="5"/><path d="M0 0L32 32M32 0L0 32" stroke="#c8102e" stroke-width="2.2"/><path d="M16 0V32M0 16H32" stroke="#fff" stroke-width="8"/><path d="M16 0V32M0 16H32" stroke="#c8102e" stroke-width="4.5"/><g fill="#fff"><circle cx="16" cy="46" r="4.2"/><circle cx="48" cy="18" r="2.3"/><circle cx="44" cy="31" r="2.3"/><circle cx="53" cy="28" r="2"/><circle cx="48" cy="44" r="2.5"/><circle cx="51" cy="35" r="1.4"/></g></svg>',
+  KRW:'<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" fill="#fff"/><circle cx="32" cy="32" r="13.5" fill="#0047a0"/><path d="M18.5 32a13.5 13.5 0 0 1 27 0a6.75 6.75 0 0 1-13.5 0a6.75 6.75 0 0 0-13.5 0Z" fill="#cd2e3a"/><g stroke="#111" stroke-width="2.5" stroke-linecap="round"><line x1="11" y1="18" x2="18" y2="11"/><line x1="14" y1="21" x2="21" y2="14"/><line x1="46" y1="11" x2="53" y2="18"/><line x1="43" y1="14" x2="50" y2="21"/><line x1="11" y1="46" x2="18" y2="53"/><line x1="14" y1="43" x2="21" y2="50"/><line x1="46" y1="53" x2="53" y2="46"/><line x1="43" y1="50" x2="50" y2="43"/></g></svg>'
+};
+function currencyFlag(ccy, small=false){
+  const code = String(ccy || '').trim().toUpperCase();
+  const key = code === 'GBX' ? 'GBP' : code;
+  const svg = CURRENCY_FLAGS[key];
+  const cls = small ? 'flag-icon flag-sm' : 'flag-icon';
+  if(svg) return `<span class="${cls}" aria-hidden="true">${svg}</span>`;
+  return `<span class="${cls} flag-fallback" aria-hidden="true">${html(code.slice(0,3) || '¤')}</span>`;
 }
 const todayISO = () => new Date().toLocaleDateString('en-CA');
 function html(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -36,6 +70,12 @@ function quantityFmt(n){return new Intl.NumberFormat('en-US',{maximumFractionDig
 function fmt(v,ccy=state.dashboard?.base_currency ?? state.user?.base_currency ?? 'SEK',digits=0){
   if(v==null)return '—';if(state.hidden)return '••••••';
   const value=compact(v,digits);return ccy==='SEK' ? `${value} kr` : ccy==='INR'?`₹${value}`: ccy==='USD'?`$${value}`:ccy==='EUR'?`€${value}`:ccy==='GBP'?`£${value}`:`${value} ${ccy}`;
+}
+function fmtCashNative(v,ccy,digits=2){
+  if(v==null)return '—';if(state.hidden)return '••••••';
+  const code=String(ccy||'').toUpperCase();
+  const value=compact(v,digits);
+  return code==='SEK' ? `${value} kr` : `${value} ${code}`;
 }
 function signedFmt(v,ccy=state.dashboard?.base_currency ?? state.user?.base_currency ?? 'SEK',digits=2){
   if(v==null)return '—';if(state.hidden)return '••••••';
@@ -89,7 +129,11 @@ function applyTheme(theme){
     const selected=b.dataset.themeChoice===state.theme;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));
   });
   syncQuickThemeIcons();
-  if(state.dashboard){renderDashboard();renderAnalytics();renderChart(state.history[state.historyRange]??null);}
+  if(state.dashboard){
+    renderDashboard();
+    renderAnalytics();
+    renderChart(currentHistorySeries());
+  }
 }
 function toggleHidden(value){
   state.hidden=!!value;localStorage.setItem('track-private',String(value));
@@ -98,9 +142,13 @@ function toggleHidden(value){
   for(const id of ['privacy-toggle', 'sidebar-privacy-toggle']){
     const btn = $(id); if(btn) btn.innerHTML = icon;
   }
-  if(state.dashboard){renderDashboard();renderAnalytics();renderChart(state.history[state.historyRange]??null);}
+  if(state.dashboard){
+    renderDashboard();
+    renderAnalytics();
+    renderChart(currentHistorySeries());
+  }
   if(state.lastTax)renderTax(state.lastTax);
-  renderTrades();
+  renderHistoryList();
 }
 function showAuth(){ $('loader').classList.add('hidden');$('app').classList.add('hidden');$('auth').classList.remove('hidden'); }
 function showApp(){ $('loader').classList.add('hidden');$('auth').classList.add('hidden');$('app').classList.remove('hidden'); }
@@ -120,9 +168,16 @@ function nav(tab){
     if(active)btn.setAttribute('aria-current','page');else btn.removeAttribute('aria-current');
   });
   window.scrollTo({top:0,behavior:'instant'});
-  if(tab==='analytics'){renderAnalytics();setTimeout(()=>fitCapitalTileLabels($('capital-chart')),30);}
+  if(tab==='analytics'){
+    renderAnalytics();
+    setTimeout(()=>{
+      fitCapitalTileLabels($('capital-chart'));
+      state.cashDonutChart?.resize();
+      state.navDonutChart?.resize();
+    },35);
+  }
   if(tab==='home'){setTimeout(()=>state.chart?.resize(),40);}
-  if(tab==='history')loadTrades();
+  if(tab==='history')loadHistoryData();
   if(tab==='tax')loadTax();
   if(tab==='account')renderAccount();
 }
@@ -649,6 +704,7 @@ function bindAssetLogoImages(){
   },true);
 }
 
+
 function sortedHomeHoldings(holdings){
   const list = [...holdings];
   if(state.homeSort === 'pnl'){
@@ -662,16 +718,75 @@ function sortedHomeHoldings(holdings){
   }
   return list;
 }
+
+function currentHistorySeries(mode=state.dashboardMode, span=state.historyRange){
+  return state.history[mode]?.[span] ?? null;
+}
+
+function dashboardModeMeta(mode=state.dashboardMode){
+  const d = state.dashboard;
+  if(!d) return { title:'INVESTMENTS', value:null, invested:0, pnl:0, realized_total:0, hasData:false };
+  if(mode === 'cash'){
+    const ct = d.cash?.totals || {};
+    return {
+      title:'CASH',
+      value:Number(ct.value)||0,
+      invested:Number(ct.invested)||0,
+      pnl:Number(ct.pnl)||0,
+      realized_total:Number(ct.realized_total)||0,
+      hasData:(d.cash_count||0) > 0
+    };
+  }
+  if(mode === 'nav'){
+    const nt = d.nav || {};
+    return {
+      title:'NET ASSET VALUE',
+      value:Number(nt.value)||0,
+      invested:Number(nt.invested)||0,
+      pnl:Number(nt.pnl)||0,
+      realized_total:Number(nt.realized_total)||0,
+      hasData:((d.trades_count||0) + (d.cash_count||0)) > 0
+    };
+  }
+  const t = d.totals || {};
+  return {
+    title:'INVESTMENTS',
+    value:Number(t.value)||0,
+    invested:Number(t.invested)||0,
+    pnl:Number(t.pnl)||0,
+    realized_total:Number(d.realized_total)||0,
+    hasData:(d.trades_count||0) > 0
+  };
+}
+
+function renderCashBalancesCard(){
+  const target = $('main-cash-balances');
+  if(!target || !state.dashboard) return;
+  const base = state.dashboard.base_currency || 'SEK';
+  const balances = state.dashboard.cash?.balances || [];
+  if(!balances.length){
+    target.innerHTML = emptyMessage('No cash balances yet', 'Add a Cash transaction or upload your cash_txns.csv in Account.', null);
+    return;
+  }
+  target.innerHTML = balances.map(b=>{
+    const ccy = b.currency;
+    const name = b.name || CURRENCY_NAMES[ccy] || ccy;
+    const nativeText = fmtCashNative(b.amount, ccy, 2);
+    const baseText = b.is_base ? '' : `<span class="cash-base-eq">${html(fmt(b.value, base, 2))}</span>`;
+    return `<div class="holding-row cash-row">${currencyFlag(ccy)}<div class="holding-info"><div class="holding-name">${html(ccy)}</div><div class="holding-subtitle">${html(name)}</div></div><div class="holding-value"><strong>${html(nativeText)}</strong>${baseText}</div></div>`;
+  }).join('');
+}
+
 function renderDashboard(){
   const d=state.dashboard;if(!d)return;
-  const t=d.totals, base=d.base_currency;
-  $('total-value').textContent=fmt(t.value,base,0);
+  const base=d.base_currency;
+  const meta=dashboardModeMeta(state.dashboardMode);
+  const titleEl=$('hero-title');
+  if(titleEl) titleEl.textContent=meta.title;
+  $('total-value').textContent=fmt(meta.value,base,0);
   $('hero-ccy').textContent=base;
-  renderDevelopmentHeadline(state.history[state.historyRange]??null);
-  $('invested-value').textContent=fmt(t.invested,base,0);
-  $('unrealized-value').textContent=fmt(t.pnl,base,0);
-  $('unrealized-value').classList.toggle('negative',t.pnl<0);
-  $('holdings-count').textContent=state.hidden?'••':t.assets;
+  renderDevelopmentHeadline(currentHistorySeries());
+  renderCashBalancesCard();
   $('holdings-badge').textContent=d.holdings.length;
   const holdings = sortedHomeHoldings(d.holdings);
   $('main-holdings').innerHTML=holdings.length?holdings.map(h=>{
@@ -680,8 +795,42 @@ function renderDashboard(){
   }).join(''):emptyMessage('Nothing in your portfolio yet','Add a trade or upload your existing trades CSV.','trade');
   activatePendingLogoSearch($('main-holdings'));
 }
+
 function emptyMessage(title,desc,action){return `<div class="empty"><strong>${html(title)}</strong>${html(desc)}${action?`<button type="button" data-go="${action}">Get started →</button>`:''}</div>`;}
-function renderAnalytics(){
+
+function setDashboardMode(mode){
+  if(!['investments','cash','nav'].includes(mode)) return;
+  if(state.dashboardMode === mode) return;
+  endChartScrub();
+  state.dashboardMode = mode;
+  document.querySelectorAll('[data-dash-mode]').forEach(btn=>{
+    const active = btn.dataset.dashMode === mode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  });
+  renderDashboard();
+  loadRange(state.historyRange);
+}
+
+function setAnalyticsMode(mode){
+  if(!['investments','cash','nav'].includes(mode)) return;
+  state.analyticsMode = mode;
+  document.querySelectorAll('[data-analytics-mode]').forEach(btn=>{
+    const active = btn.dataset.analyticsMode === mode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  });
+  for(const m of ['investments','cash','nav']){
+    $('analytics-pane-'+m)?.classList.toggle('hidden', m !== mode);
+  }
+  if(state.dashboard){
+    if(mode==='investments'){ renderInvestmentAnalytics(); setTimeout(()=>fitCapitalTileLabels($('capital-chart')),30); }
+    else if(mode==='cash'){ renderCashAnalytics(); setTimeout(()=>state.cashDonutChart?.resize(),30); }
+    else { renderNavAnalytics(); setTimeout(()=>state.navDonutChart?.resize(),30); }
+  }
+}
+
+function renderInvestmentAnalytics(){
   const d=state.dashboard;if(!d)return;
   $('analytics-n').textContent=`${d.holdings.length} assets`;
   $('analytics-holdings').innerHTML=d.holdings.length?d.holdings.map(h=>{
@@ -693,6 +842,205 @@ function renderAnalytics(){
   }).join(''):emptyMessage('No investments found','Your holdings appear here after you add trades.','trade');
   activatePendingLogoSearch($('analytics-holdings'));
   renderCapitalChart();
+}
+
+function renderCashAnalytics(){
+  const d=state.dashboard;if(!d)return;
+  const base=d.base_currency || 'SEK';
+  const cash=d.cash || { balances:[], totals:{ value:0, invested:0, pnl:0, pnl_pct:0, currencies:0 } };
+  const balances=cash.balances || [];
+  const totals=cash.totals || {};
+
+  $('cash-analytics-total').textContent = fmt(totals.value || 0, base, 2);
+  const pnlEl = $('cash-analytics-pnl');
+  const pnlVal = Number(totals.pnl) || 0;
+  pnlEl.textContent = signedFmt(pnlVal, base, 2);
+  pnlEl.classList.toggle('negative', pnlVal < -0.005);
+  pnlEl.classList.toggle('positive', pnlVal >= 0.005);
+
+  const countLabel = `${balances.length} ${balances.length===1?'currency':'currencies'}`;
+  $('cash-exposure-count').textContent = countLabel;
+  $('cash-detail-n').textContent = countLabel;
+
+  // Currency Exposure Donut + List
+  const chartEl = $('cash-exposure-chart');
+  const listEl = $('cash-exposure-list');
+  const positiveBalances = balances.filter(b => (Number(b.value)||0) > 0);
+  if(!positiveBalances.length){
+    if(state.cashDonutChart){ state.cashDonutChart.dispose(); state.cashDonutChart=null; }
+    chartEl.innerHTML = '<div class="empty" style="margin:8px">No positive cash exposure yet.</div>';
+    listEl.innerHTML = '';
+  } else {
+    const dark = state.theme === 'dark';
+    const items = positiveBalances.map((b, i) => ({
+      ...b,
+      color: capitalColors[i % capitalColors.length]
+    }));
+    if(typeof echarts !== 'undefined'){
+      if(state.cashDonutChart && !chartEl.querySelector('canvas')){
+        state.cashDonutChart.dispose(); state.cashDonutChart=null; chartEl.innerHTML='';
+      }
+      if(!state.cashDonutChart) state.cashDonutChart = echarts.init(chartEl);
+      state.cashDonutChart.setOption({
+        animationDuration: 300,
+        tooltip: {
+          trigger: 'item',
+          confine: true,
+          backgroundColor: dark ? 'rgba(20,24,31,.96)' : 'rgba(248,245,239,.97)',
+          borderWidth: 1,
+          borderColor: dark ? 'rgba(255,255,255,.12)' : 'rgba(38,32,22,.12)',
+          textStyle: { color: dark ? '#eef4fc' : '#1f1d1a', fontSize: 13 },
+          formatter: (p) => `<b>${html(p.name)}</b><br>${html(fmt(p.value, base, 2))} (${state.hidden ? '••••' : compact(p.percent, 1) + '%'})`
+        },
+        series: [{
+          type: 'pie',
+          radius: ['58%', '84%'],
+          center: ['50%', '50%'],
+          avoidLabelOverlap: true,
+          itemStyle: {
+            borderColor: dark ? '#12151b' : '#f8f5ef',
+            borderWidth: 2
+          },
+          label: { show: false },
+          emphasis: { scale: true, scaleSize: 4 },
+          data: items.map(it => ({
+            name: it.currency,
+            value: Math.round(it.value * 100) / 100,
+            itemStyle: { color: it.color }
+          }))
+        }]
+      }, true);
+      state.cashDonutChart.resize();
+    }
+    listEl.innerHTML = items.map(it => {
+      const shareStr = state.hidden ? '••••' : compact(it.share, 1) + '%';
+      return `<div class="exposure-row"><span class="exposure-dot" style="background:${it.color}"></span>${currencyFlag(it.currency, true)}<div class="exposure-info"><strong>${html(it.currency)}</strong><span>${html(it.name || CURRENCY_NAMES[it.currency] || it.currency)}</span></div><div class="exposure-vals"><strong>${html(shareStr)}</strong><span>${html(fmt(it.value, base, 2))}</span></div></div>`;
+    }).join('');
+  }
+
+  // Currencies in Detail
+  $('cash-detail-list').innerHTML = balances.length ? balances.map(b => {
+    const neg = (Number(b.pnl) || 0) < -0.005;
+    const avgTxt = state.hidden ? '••••' : compact(b.avg_cost, 4);
+    const fxTxt = b.fx_rate != null ? (state.hidden ? '••••' : compact(b.fx_rate, 4)) : '—';
+    return `<div class="analytics-entry cash-detail-entry"><div class="analytics-row-top"><div class="analytics-identity">${currencyFlag(b.currency)}<div class="analytics-title-group"><div class="holding-name">${html(b.currency)}</div><div class="analytics-ltp">${html(b.name || CURRENCY_NAMES[b.currency] || b.currency)}</div></div></div><div class="cash-detail-right"><strong>${html(fmtCashNative(b.amount, b.currency, 2))}</strong><span>${html(fmt(b.value, base, 2))}</span></div></div><div class="analytics-row-metrics"><div class="analytics-metric"><span>Avg Cost (${html(base)})</span><strong>${html(avgTxt)}</strong></div><div class="analytics-metric analytics-metric-mid"><span>Current FX (${html(base)})</span><strong>${html(fxTxt)}</strong></div><div class="analytics-metric analytics-metric-end"><span>Unrealized P/L</span><strong class="analytics-pnl-val ${neg?'negative':''}">${html(signedFmt(b.pnl, base, 2))}</strong></div></div></div>`;
+  }).join('') : emptyMessage('No cash currencies yet', 'Add a Cash transaction or upload cash_txns.csv in Account.', 'trade');
+}
+
+function renderNavAnalytics(){
+  const d=state.dashboard;if(!d)return;
+  const base=d.base_currency || 'SEK';
+  const nav=d.nav || { value:0, invested:0, pnl:0, pnl_pct:0, realized_total:0, investments_value:0, cash_value:0, investments_share:0, cash_share:0 };
+  const invT=d.totals || { value:0, invested:0, pnl:0 };
+  const cashT=d.cash?.totals || { value:0, invested:0, pnl:0, realized_total:0 };
+  const dark = state.theme === 'dark';
+  const invColor = dark ? '#58e3fb' : '#1b7fb3';
+  const cashColor = dark ? '#68d8ad' : '#168065';
+
+  $('nav-donut-total').textContent = fmt(nav.value, base, 0);
+  $('nav-breakdown-ccy').textContent = base;
+
+  const chartEl = $('nav-allocation-chart');
+  const invVal = Math.max(0, Number(nav.investments_value)||0);
+  const cashVal = Math.max(0, Number(nav.cash_value)||0);
+  const hasAny = (invVal + cashVal) > 0;
+
+  if(typeof echarts !== 'undefined'){
+    if(state.navDonutChart && !chartEl.querySelector('canvas')){
+      state.navDonutChart.dispose(); state.navDonutChart=null; chartEl.innerHTML='';
+    }
+    if(!state.navDonutChart) state.navDonutChart = echarts.init(chartEl);
+    const pieData = hasAny ? [
+      { name:'Investments', value:Math.round(invVal*100)/100, itemStyle:{ color:invColor } },
+      { name:'Cash', value:Math.round(cashVal*100)/100, itemStyle:{ color:cashColor } }
+    ] : [
+      { name:'Empty', value:1, itemStyle:{ color: dark ? '#242934' : '#e2dacb' } }
+    ];
+    state.navDonutChart.setOption({
+      animationDuration: 300,
+      tooltip: hasAny ? {
+        trigger:'item', confine:true,
+        backgroundColor: dark ? 'rgba(20,24,31,.96)' : 'rgba(248,245,239,.97)',
+        borderWidth: 1,
+        borderColor: dark ? 'rgba(255,255,255,.12)' : 'rgba(38,32,22,.12)',
+        textStyle: { color: dark ? '#eef4fc' : '#1f1d1a', fontSize: 13 },
+        formatter: (p) => `<b>${html(p.name)}</b><br>${html(fmt(p.value, base, 0))} (${state.hidden ? '••••' : compact(p.percent, 1) + '%'})`
+      } : { show:false },
+      series: [{
+        type:'pie',
+        radius:['68%', '92%'],
+        center:['50%', '50%'],
+        startAngle: 90,
+        clockwise: true,
+        itemStyle:{
+          borderColor: dark ? '#12151b' : '#f8f5ef',
+          borderWidth: 2
+        },
+        label:{ show:false },
+        emphasis:{ scale: hasAny, scaleSize: 3 },
+        data: pieData
+      }]
+    }, true);
+    state.navDonutChart.resize();
+  }
+
+  $('nav-allocation-legend').innerHTML = `
+    <div class="nav-legend-item">
+      <div class="nav-legend-left">
+        <span class="nav-legend-dot" style="background:${invColor}"></span>
+        <div><strong>Investments</strong><span>${html(fmt(nav.investments_value, base, 0))}</span></div>
+      </div>
+      <span class="nav-legend-pct">${state.hidden ? '••••' : compact(nav.investments_share, 1) + '%'}</span>
+    </div>
+    <div class="nav-legend-item">
+      <div class="nav-legend-left">
+        <span class="nav-legend-dot" style="background:${cashColor}"></span>
+        <div><strong>Cash</strong><span>${html(fmt(nav.cash_value, base, 0))}</span></div>
+      </div>
+      <span class="nav-legend-pct">${state.hidden ? '••••' : compact(nav.cash_share, 1) + '%'}</span>
+    </div>`;
+
+  const rows = [
+    {
+      title:'Investments',
+      subtitle:`${d.holdings.length} open ${d.holdings.length===1?'holding':'holdings'}`,
+      dot:invColor,
+      value:invT.value||0,
+      cost:invT.invested||0,
+      unrealized:invT.pnl||0,
+      realized:d.realized_total||0
+    },
+    {
+      title:'Cash',
+      subtitle:`${d.cash?.balances?.length||0} active ${(d.cash?.balances?.length||0)===1?'currency':'currencies'}`,
+      dot:cashColor,
+      value:cashT.value||0,
+      cost:cashT.invested||0,
+      unrealized:cashT.pnl||0,
+      realized:cashT.realized_total||0
+    },
+    {
+      title:'Total Net Asset Value',
+      subtitle:'Investments + Cash',
+      dot: dark ? '#eef4fc' : '#1f1d1a',
+      value:nav.value||0,
+      cost:nav.invested||0,
+      unrealized:nav.pnl||0,
+      realized:nav.realized_total||0
+    }
+  ];
+  $('nav-breakdown-list').innerHTML = rows.map(r => {
+    const uNeg = r.unrealized < -0.5;
+    const rNeg = r.realized < -0.5;
+    return `<div class="analytics-entry nav-breakdown-entry"><div class="analytics-row-top"><div class="analytics-identity"><span class="nav-breakdown-dot" style="background:${r.dot}"></span><div class="analytics-title-group"><div class="holding-name">${html(r.title)}</div><div class="analytics-ltp">${html(r.subtitle)}</div></div></div><div class="cash-detail-right"><strong>${html(fmt(r.value, base, 0))}</strong></div></div><div class="analytics-row-metrics"><div class="analytics-metric"><span>Cost Basis</span><strong>${html(fmt(r.cost, base, 0))}</strong></div><div class="analytics-metric analytics-metric-mid"><span>Unrealized P/L</span><strong class="analytics-pnl-val ${uNeg?'negative':''}">${html(signedFmt(r.unrealized, base, 0))}</strong></div><div class="analytics-metric analytics-metric-end"><span>Realized P/L</span><strong class="analytics-pnl-val ${rNeg?'negative':''}">${html(signedFmt(r.realized, base, 0))}</strong></div></div></div>`;
+  }).join('');
+}
+
+function renderAnalytics(){
+  if(!state.dashboard)return;
+  if(state.analyticsMode === 'cash') renderCashAnalytics();
+  else if(state.analyticsMode === 'nav') renderNavAnalytics();
+  else renderInvestmentAnalytics();
 }
 
 // The backend already converts every holding's `value` into the account's base currency.
@@ -858,17 +1206,19 @@ function renderCapitalChart(animate=false){
   if(animate)animateCapitalTiles(target,previousRects,previousFocused,state.capitalFocus);
 }
 
+
 function computeSpanDevelopment(series){
   const d=state.dashboard;
   if(!d)return null;
-  const invested=Number(d.totals?.invested)||0;
+  const meta=dashboardModeMeta(series?.mode || state.dashboardMode);
+  const invested=meta.invested;
   const rawPoints=series?.points||[];
   if(!rawPoints.length){
-    if(!d.trades_count)return {value:0,pct:0,points:[]};
+    if(!meta.hasData)return {value:0,pct:0,points:[]};
     return null;
   }
   const hasBaseline=series && typeof series.baseline==='number';
-  const liveCumDev=(Number(d.totals?.pnl)||0)+(Number(d.realized_total ?? series.realized_total)||0);
+  const liveCumDev=meta.pnl + (Number(meta.realized_total ?? series.realized_total)||0);
   const devValue=hasBaseline ? (liveCumDev - series.baseline) : (Number(series.development ?? rawPoints[rawPoints.length-1].value)||0);
   const devPct=invested > 1e-9 ? (100 * devValue / invested) : 0;
   const points=rawPoints.map(p=>({
@@ -879,11 +1229,11 @@ function computeSpanDevelopment(series){
   }));
   if(hasBaseline && points.length){
     points[points.length-1].value=Math.round(devValue*100)/100;
-    if(typeof d.totals?.value==='number'){
-      points[points.length-1].portfolio_value=d.totals.value;
+    if(typeof meta.value==='number'){
+      points[points.length-1].portfolio_value=meta.value;
     }
-    if(typeof d.totals?.invested==='number'){
-      points[points.length-1].invested=d.totals.invested;
+    if(typeof meta.invested==='number'){
+      points[points.length-1].invested=meta.invested;
     }
   }
   return {value:devValue,pct:devPct,points};
@@ -902,10 +1252,11 @@ function renderDevelopmentHeadline(series, scrubPoint=null){
   if(!el)return;
   const d=state.dashboard;
   const base=d?.base_currency || state.user?.base_currency || 'SEK';
+  const meta=dashboardModeMeta(series?.mode || state.dashboardMode);
   if(scrubPoint && d){
     const invested=scrubPoint.invested!=null
       ? (Number(scrubPoint.invested)||0)
-      : (Number(d.totals?.invested)||0);
+      : meta.invested;
     const val=Number(scrubPoint.value)||0;
     const pct=invested > 1e-9 ? (100 * val / invested) : 0;
     const cleanVal=Math.abs(val)<0.5?0:val;
@@ -921,7 +1272,7 @@ function renderDevelopmentHeadline(series, scrubPoint=null){
     return;
   }
   if(totalEl && d){
-    totalEl.textContent=fmt(d.totals.value,base,0);
+    totalEl.textContent=fmt(meta.value,base,0);
   }
   const dev=computeSpanDevelopment(series);
   if(!d || !dev){
@@ -979,7 +1330,7 @@ function updateChartScrubAt(clientX){
   state.chartScrubIndex=idx;
   const pt=state.chartPoints[idx];
   if(!pt)return;
-  renderDevelopmentHeadline(state.history[state.historyRange]??null, pt);
+  renderDevelopmentHeadline(currentHistorySeries(), pt);
   if(state.chart){
     try{ state.chart.dispatchAction({type:'showTip',seriesIndex:0,dataIndex:idx}); }catch(_){}
   }
@@ -997,7 +1348,7 @@ function endChartScrub(){
     if(state.chart){
       try{ state.chart.dispatchAction({type:'hideTip'}); state.chart.dispatchAction({type:'updateAxisPointer',currTrigger:'leave'}); }catch(_){}
     }
-    renderDevelopmentHeadline(state.history[state.historyRange]??null, null);
+    renderDevelopmentHeadline(currentHistorySeries(), null);
   }
 }
 
@@ -1008,12 +1359,10 @@ function bindChartScrub(){
   const HOLD_MS=180;
   const MOVE_CANCEL_PX=10;
 
-  // Prevent browser context menu on long-press over the canvas.
   target.addEventListener('contextmenu',e=>{
     if(chartScrub.active || chartScrub.timer) e.preventDefault();
   });
 
-  // Touch: require steady hold (180ms) before scrubbing so vertical scrolling & accidental taps stay untouched.
   target.addEventListener('touchstart',e=>{
     if(e.touches.length!==1 || !state.chartPoints.length)return;
     const t=e.touches[0];
@@ -1057,7 +1406,6 @@ function bindChartScrub(){
   target.addEventListener('touchend',finishTouch,{passive:true});
   target.addEventListener('touchcancel',finishTouch,{passive:true});
 
-  // Desktop mouse: require click-and-hold (180ms); plain hover or quick clicks do nothing.
   target.addEventListener('mousedown',e=>{
     if(e.button!==0 || !state.chartPoints.length)return;
     if(Date.now()-chartScrub.lastTouchEnd < 600)return;
@@ -1101,7 +1449,14 @@ function renderChart(series){
   const points=dev?.points||series?.points||[];
   state.chartPoints=points;
   state.chartTimestamps=points.map(p=>Date.parse(p.date));
-  if(!points.length){if(state.chart){state.chart.clear();}target.innerHTML='<div class="empty" style="margin:30px 10px">Portfolio development will appear here when historical data is available.</div>';return;}
+  if(!points.length){
+    if(state.chart){state.chart.clear();}
+    const emptyText = state.dashboardMode==='cash'
+      ? 'Cash development will appear here after you add cash transactions.'
+      : 'Portfolio development will appear here when historical data is available.';
+    target.innerHTML=`<div class="empty" style="margin:30px 10px">${html(emptyText)}</div>`;
+    return;
+  }
   if(state.chart && !target.querySelector('canvas')){state.chart.dispose();state.chart=null;target.innerHTML='';}
   const data=points.map((p,i)=>[state.chartTimestamps[i],p.value]);
   const dark = state.theme === 'dark';
@@ -1143,19 +1498,28 @@ function renderChart(series){
   state.chart.resize();
 }
 
-function fetchHistorySpan(span){
-  const rev = state.historyRevision || '';
-  const inflightKey = rev + '|' + span;
+function clearHistoryCache(modes=['investments','cash','nav']){
+  for(const m of modes){
+    state.history[m] = {};
+    state.historyRevisions[m] = null;
+  }
+  inFlightHistory.clear();
+}
+
+function fetchHistorySpan(span, mode=state.dashboardMode){
+  const rev = state.historyRevisions[mode] || '';
+  const inflightKey = mode + '|' + rev + '|' + span;
   if(inFlightHistory.has(inflightKey)) return inFlightHistory.get(inflightKey);
-  const req = api('/api/history?span='+encodeURIComponent(span))
+  const url = `/api/history?span=${encodeURIComponent(span)}&mode=${encodeURIComponent(mode)}`;
+  const req = api(url)
     .then(data=>{
       if(data.history_revision){
-        if(state.historyRevision && state.historyRevision !== data.history_revision){
-          state.history = {};
+        if(state.historyRevisions[mode] && state.historyRevisions[mode] !== data.history_revision){
+          state.history[mode] = {};
         }
-        state.historyRevision = data.history_revision;
+        state.historyRevisions[mode] = data.history_revision;
       }
-      state.history[span] = data;
+      state.history[mode][span] = data;
       return data;
     })
     .finally(()=>{ inFlightHistory.delete(inflightKey); });
@@ -1164,54 +1528,60 @@ function fetchHistorySpan(span){
 }
 
 function prefetchRange(span){
-  if(!state.user || state.history[span]) return;
-  fetchHistorySpan(span).catch(()=>{});
+  const mode = state.dashboardMode;
+  if(!state.user || state.history[mode]?.[span]) return;
+  fetchHistorySpan(span, mode).catch(()=>{});
 }
 
 async function loadRange(span, silent=false){
   endChartScrub();
+  const mode = state.dashboardMode;
   state.historyRange=span;
   document.querySelectorAll('[data-range]').forEach(el=>el.classList.toggle('selected',el.dataset.range===span));
-  if(state.history[span]){renderChart(state.history[span]);return;}
+  const cached = state.history[mode]?.[span];
+  if(cached){renderChart(cached);return;}
   if(!silent){renderDevelopmentHeadline(null);$('history-loading').classList.remove('hidden');}
   try{
-    const data=await fetchHistorySpan(span);
-    if(state.historyRange===span)renderChart(data);
-  }catch(e){if(!silent)toast('Portfolio history: '+e.message,true);}
-  finally{if(state.historyRange===span)$('history-loading').classList.add('hidden');}
+    const data=await fetchHistorySpan(span, mode);
+    if(state.historyRange===span && state.dashboardMode===mode) renderChart(data);
+  }catch(e){if(!silent)toast('Development history: '+e.message,true);}
+  finally{if(state.historyRange===span && state.dashboardMode===mode)$('history-loading').classList.add('hidden');}
 }
 
 function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false){
   const prevBase = state.dashboard?.base_currency;
-  const prevRev = state.historyRevision || state.dashboard?.history_revision;
-  const nextRev = d.history_revision || null;
   const baseChanged = !!(prevBase && prevBase !== d.base_currency);
-  const revChanged = !!(prevRev && nextRev && prevRev !== nextRev);
-  const hadChart = !!state.history[state.historyRange];
-  if(baseChanged || revChanged){
-    state.history = {};
-    inFlightHistory.clear();
+  const nextRevs = d.history_revisions || { investments: d.history_revision || null, cash: null, nav: null };
+  const hadChart = !!currentHistorySeries();
+  for(const m of ['investments','cash','nav']){
+    const prevR = state.historyRevisions[m];
+    const nextR = nextRevs[m];
+    if(baseChanged || (prevR && nextR && prevR !== nextR)){
+      state.history[m] = {};
+    }
+    if(nextR) state.historyRevisions[m] = nextR;
   }
+  if(baseChanged) inFlightHistory.clear();
   state.dashboard = d;
-  if(nextRev) state.historyRevision = nextRev;
   renderDashboard();
   renderAnalytics();
   renderAccount();
+  const activeMode = state.dashboardMode;
   if(preloadedHistory){
+    const targetMode = preloadedHistory.mode || activeMode;
     const targetSpan = preloadedHistory.range || state.historyRange;
-    state.history[targetSpan] = preloadedHistory;
-    if(state.view === 'home' && state.historyRange === targetSpan){
+    if(!state.history[targetMode]) state.history[targetMode] = {};
+    state.history[targetMode][targetSpan] = preloadedHistory;
+    if(state.view === 'home' && activeMode === targetMode && state.historyRange === targetSpan){
       $('history-loading').classList.add('hidden');
       renderChart(preloadedHistory);
     }
     return;
   }
-  if(historyUnchanged && state.history[state.historyRange]){
-    if(state.view === 'home') renderChart(state.history[state.historyRange]);
+  if(historyUnchanged && state.history[activeMode]?.[state.historyRange]){
+    if(state.view === 'home') renderChart(state.history[activeMode][state.historyRange]);
     return;
   }
-  // If a chart is already rendered and only NSE official close metadata updated,
-  // refresh the chart silently in the background without blanking or blocking UI.
   if(state.view === 'home') loadRange(state.historyRange, hadChart && !baseChanged);
 }
 
@@ -1228,11 +1598,13 @@ async function refreshPortfolio(){
   const label = btn.querySelector('.refresh-label');
   if(label) label.textContent = 'Refreshing…';
   try{
-    const knownRev = state.historyRevision || state.dashboard?.history_revision || '';
+    const mode = state.dashboardMode;
+    const knownRev = state.historyRevisions[mode] || '';
     const params = new URLSearchParams({
       include_dashboard: 'true',
       include_history: 'true',
       span: state.historyRange,
+      mode,
       known_history_revision: knownRev
     });
     const result=await api('/api/refresh?' + params.toString(),{method:'POST'});
@@ -1242,7 +1614,11 @@ async function refreshPortfolio(){
       await reloadDashboard();
     }
     const failures=Object.keys(result.errors||{});
-    toast(`Updated ${result.updated}/${result.requested??0} latest prices${failures.length?`; unavailable: ${failures.join(', ')}`:''}`,!!failures.length);
+    if((result.requested??0)===0){
+      toast('FX rates & balances refreshed');
+    } else {
+      toast(`Updated ${result.updated}/${result.requested??0} latest prices${failures.length?`; unavailable: ${failures.join(', ')}`:''}`,!!failures.length);
+    }
   }catch(e){toast(e.message,true);}
   finally{
     btn.classList.remove('is-refreshing');btn.disabled=false;
@@ -1250,23 +1626,207 @@ async function refreshPortfolio(){
   }
 }
 
-function formTrade(form){const fd=new FormData(form);const val=Object.fromEntries(fd.entries());
+// ─── New Trade / Cash Form Mode & Cash Sync ────────────────────────────────
+function isCashTradeMode(){
+  return $('trade-asset-type')?.value === 'Cash';
+}
+
+function syncTradeFormMode(){
+  const f = $('trade-form');
+  if(!f) return;
+  const cashMode = isCashTradeMode();
+  $('trade-side-toggle')?.classList.toggle('hidden', cashMode);
+  $('cash-type-toggle')?.classList.toggle('hidden', !cashMode);
+
+  const assetEl = f.elements.asset;
+  const tickerEl = f.elements.ticker;
+  const priceEl = f.elements.price_trade_ccy;
+  const sttEl = f.elements.stt_trade_ccy;
+
+  $('lbl-asset').textContent = cashMode ? 'Memo / Note (optional)' : 'Asset name';
+  assetEl.placeholder = cashMode ? 'e.g. Salary transfer, FX conversion' : 'e.g. APPLE';
+  assetEl.required = !cashMode;
+
+  $('lbl-ticker').textContent = cashMode ? 'Ticker (N/A for Cash)' : 'Ticker (yFinance)';
+  tickerEl.disabled = cashMode;
+  if(cashMode) tickerEl.value = '';
+
+  $('lbl-date').textContent = cashMode ? 'Date' : 'Trade date';
+  $('lbl-quantity').textContent = cashMode ? 'Amount' : 'Quantity';
+
+  $('lbl-price').textContent = cashMode ? 'Price per unit (N/A)' : 'Price per unit';
+  priceEl.disabled = cashMode;
+  priceEl.required = !cashMode;
+  if(cashMode) priceEl.value = '';
+
+  $('lbl-ccy').textContent = cashMode ? 'Currency' : 'Trade currency';
+  $('lbl-fees').textContent = cashMode ? 'Exchange fee' : 'Fees / brokerage';
+
+  $('lbl-stt').textContent = cashMode ? 'Tax / STT (N/A)' : 'Tax / STT';
+  sttEl.disabled = cashMode;
+  if(cashMode) sttEl.value = '0';
+
+  $('trade-preview-label').textContent = cashMode ? 'Cash transaction amount' : 'Trade value (excluding fees)';
+  $('trade-submit-btn').textContent = cashMode ? 'Save cash transaction' : 'Save trade';
+  updateTradePreview();
+}
+
+function formTrade(form){
+  const fd=new FormData(form);const val=Object.fromEntries(fd.entries());
   for(const f of ['quantity','price_trade_ccy','charges_trade_ccy','stt_trade_ccy','fx_to_base','last_price_trade_ccy','last_price_base'])val[f]=Number(val[f]??(f==='fx_to_base'?1:0));
   val.trade_date=val.trade_date.includes('T')?val.trade_date.replace('T',' '):val.trade_date+' 00:00';return val;
 }
-function updateTradePreview(){const f=$('trade-form');let q=Number(f.elements.quantity.value)||0,price=Number(f.elements.price_trade_ccy.value)||0;
-  $('trade-total').querySelector('strong').textContent=fmt(q*price,f.elements.trade_ccy.value.toUpperCase()||'USD',2);
+
+function updateTradePreview(){
+  const f=$('trade-form');
+  if(!f) return;
+  const ccy = (f.elements.trade_ccy.value || 'USD').toUpperCase();
+  const q = Number(f.elements.quantity.value)||0;
+  if(isCashTradeMode()){
+    const outflow = state.cashTxnType === 'Debit' || state.cashTxnType === 'Sell';
+    const signed = outflow ? -Math.abs(q) : Math.abs(q);
+    $('trade-total').querySelector('strong').textContent = q > 0 ? signedFmt(signed, ccy, 2) : '—';
+  } else {
+    const price = Number(f.elements.price_trade_ccy.value)||0;
+    $('trade-total').querySelector('strong').textContent = fmt(q*price, ccy, 2);
+  }
 }
-async function submitTrade(e){e.preventDefault();const form=e.currentTarget;const btn=form.querySelector('[type=submit]');
-  try{btn.disabled=true;const payload={...formTrade(form),side:state.tradeSide,auto_fx:$('trade-auto-fx').checked};
-    await api('/api/trades',{method:'POST',body:payload});form.reset();form.elements.trade_date.value=todayISO();$('trade-auto-fx').checked=true;$('trade-manual-fx').disabled=true;
-    state.history={};state.historyRevision=null;inFlightHistory.clear();state.trades=[];await reloadDashboard();toast('Trade saved successfully');nav('home');
-  }catch(err){toast(err.message,true);}finally{btn.disabled=false;updateTradePreview();}
+
+function openCashSyncPrompt(suggested){
+  state.pendingCashSync = suggested;
+  const isDebit = suggested.txn_type === 'Debit';
+  const base = state.dashboard?.base_currency || 'SEK';
+  const typeLabel = isDebit ? 'Debit (Outflow)' : 'Credit (Inflow)';
+  $('cash-sync-summary').textContent = `Register the matching ${suggested.txn_type.toLowerCase()} in your cash account?`;
+  $('cash-sync-details').innerHTML = `
+    <div class="cash-sync-row"><span>Transaction</span><strong class="${isDebit?'sell':'buy'}">${html(typeLabel)}</strong></div>
+    <div class="cash-sync-row"><span>Amount</span><strong>${html(fmtCashNative(suggested.foreign_amount, suggested.foreign_ccy, 2))}</strong></div>
+    <div class="cash-sync-row"><span>Date</span><strong>${html(suggested.date)}</strong></div>
+    <div class="cash-sync-row"><span>FX rate (to ${html(base)})</span><strong>${html(compact(suggested.fx_rate, 4))}</strong></div>
+    <div class="cash-sync-row"><span>Memo</span><strong>${html(suggested.memo)}</strong></div>`;
+  $('cash-sync-dialog').showModal();
 }
+
+async function confirmCashSync(){
+  const payload = state.pendingCashSync;
+  if(!payload){ $('cash-sync-dialog').close(); return; }
+  const btn = $('cash-sync-confirm');
+  btn.disabled = true;
+  try{
+    await api('/api/cash/transactions', { method:'POST', body:{ ...payload, auto_fx:false } });
+    state.pendingCashSync = null;
+    $('cash-sync-dialog').close();
+    clearHistoryCache(['cash','nav']);
+    state.cashTxns = [];
+    await reloadDashboard();
+    toast('Trade & matching cash transaction saved');
+    nav('home');
+  }catch(err){
+    toast('Cash registration failed: ' + err.message, true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+function skipCashSync(){
+  state.pendingCashSync = null;
+  $('cash-sync-dialog').close();
+  nav('home');
+}
+
+async function submitTrade(e){
+  e.preventDefault();
+  const form=e.currentTarget;
+  const btn=form.querySelector('[type=submit]');
+  try{
+    btn.disabled=true;
+    if(isCashTradeMode()){
+      const payload = {
+        date: form.elements.trade_date.value,
+        foreign_ccy: (form.elements.trade_ccy.value || '').trim().toUpperCase(),
+        txn_type: state.cashTxnType,
+        foreign_amount: Number(form.elements.quantity.value),
+        fx_rate: Number(form.elements.fx_to_base.value || 1),
+        fee_foreign: Number(form.elements.charges_trade_ccy.value || 0),
+        memo: (form.elements.asset.value || '').trim(),
+        auto_fx: $('trade-auto-fx').checked
+      };
+      await api('/api/cash/transactions', { method:'POST', body:payload });
+      form.reset();
+      form.elements.asset_type.value='Cash';
+      form.elements.trade_date.value=todayISO();
+      $('trade-auto-fx').checked=true;
+      $('trade-manual-fx').disabled=true;
+      syncTradeFormMode();
+      clearHistoryCache(['cash','nav']);
+      state.cashTxns=[];
+      await reloadDashboard();
+      toast('Cash transaction saved successfully');
+      nav('home');
+      return;
+    }
+
+    const payload={...formTrade(form), side:state.tradeSide, auto_fx:$('trade-auto-fx').checked};
+    const res = await api('/api/trades',{method:'POST',body:payload});
+    form.reset();
+    form.elements.trade_date.value=todayISO();
+    $('trade-auto-fx').checked=true;
+    $('trade-manual-fx').disabled=true;
+    syncTradeFormMode();
+    clearHistoryCache(['investments','nav']);
+    state.trades=[];
+    await reloadDashboard();
+    toast('Trade saved successfully');
+    if(res?.suggested_cash && res.suggested_cash.foreign_amount > 0){
+      openCashSyncPrompt(res.suggested_cash);
+    } else {
+      nav('home');
+    }
+  }catch(err){toast(err.message,true);}
+  finally{btn.disabled=false;updateTradePreview();}
+}
+
+// ─── History Tab (Trades | Cash toggle) ────────────────────────────────────
+function setHistoryMode(mode){
+  if(mode !== 'trades' && mode !== 'cash') return;
+  state.historyMode = mode;
+  state.tradeLimit = 55;
+  document.querySelectorAll('[data-history-mode]').forEach(btn=>{
+    const active = btn.dataset.historyMode === mode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  });
+  $('trades-side-filters')?.classList.toggle('hidden', mode !== 'trades');
+  $('cash-side-filters')?.classList.toggle('hidden', mode !== 'cash');
+  const searchEl = $('history-search');
+  if(searchEl){
+    searchEl.placeholder = mode === 'cash'
+      ? 'Search currency, type, memo…'
+      : 'Search assets, symbols, currency…';
+  }
+  loadHistoryData();
+}
+
+async function loadHistoryData(){
+  if(state.historyMode === 'cash') await loadCashTxns();
+  else await loadTrades();
+}
+
 async function loadTrades(){
-  try{const result=await api('/api/trades');state.trades=result.rows;renderTrades();}
+  try{const result=await api('/api/trades');state.trades=result.rows;renderHistoryList();}
   catch(e){toast(e.message,true);}
 }
+
+async function loadCashTxns(){
+  try{const result=await api('/api/cash/transactions');state.cashTxns=result.rows;renderHistoryList();}
+  catch(e){toast(e.message,true);}
+}
+
+function renderHistoryList(){
+  if(state.historyMode === 'cash') renderCashTxns();
+  else renderTrades();
+}
+
 function renderTrades(){
   const target=$('trades-list');if(!target)return;
   const searchEl=$('history-search');
@@ -1284,6 +1844,32 @@ function renderTrades(){
   }).join(''):emptyMessage('No trades found','Try another search or add a new transaction.',null);
   $('load-more-trades').classList.toggle('hidden',rows.length<=state.tradeLimit);
 }
+
+function renderCashTxns(){
+  const target=$('trades-list');if(!target)return;
+  const searchEl=$('history-search');
+  const query=searchEl?searchEl.value.trim().toLowerCase():'';
+  const clearBtn=$('history-search-clear');
+  if(clearBtn) clearBtn.classList.toggle('hidden',!query);
+  const base = state.dashboard?.base_currency || 'SEK';
+  const rows = state.cashTxns.filter(r => {
+    const isIn = r.txn_type === 'Buy' || r.txn_type === 'Credit';
+    if(state.cashFilter === 'IN' && !isIn) return false;
+    if(state.cashFilter === 'OUT' && isIn) return false;
+    return `${r.foreign_ccy} ${r.txn_type} ${r.memo} ${r.date}`.toLowerCase().includes(query);
+  });
+  $('trade-count').textContent = `${rows.length} ${rows.length===1?'entry':'entries'}`;
+  target.innerHTML = rows.length ? rows.slice(0, state.tradeLimit).map(r => {
+    const isIn = r.txn_type === 'Buy' || r.txn_type === 'Credit';
+    const labelMap = { Buy:'FX BUY', Sell:'FX SELL', Credit:'CREDIT', Debit:'DEBIT' };
+    const typeLbl = labelMap[r.txn_type] || r.txn_type.toUpperCase();
+    const memoPart = r.memo ? ` · ${r.memo}` : '';
+    const sub = `${r.date} · FX ${state.hidden ? '••••' : compact(r.fx_rate, 4)}${memoPart}`;
+    return `<button class="trade-row" data-edit-cash="${html(r.txn_id)}" type="button">${currencyFlag(r.foreign_ccy)}<span class="trade-info"><strong>${html(r.foreign_ccy)} <span class="side-label ${isIn?'buy':'sell'}">${html(typeLbl)}</span></strong><span>${html(sub)}</span></span><span class="trade-amount"><strong>${html(signedFmt(r.foreign_amount, r.foreign_ccy, 2))}</strong><small>${html(fmt(r.base_amount, base, 2))}</small></span></button>`;
+  }).join('') : emptyMessage('No cash transactions found', 'Add a Cash transaction in New trade or import cash_txns.csv.', null);
+  $('load-more-trades').classList.toggle('hidden', rows.length <= state.tradeLimit);
+}
+
 function openEdit(id){const row=state.trades.find(t=>t.trade_id===id);if(!row)return;
   state.editId=id;const form=$('edit-form');
   for(const input of [...form.elements]){
@@ -1294,16 +1880,62 @@ function openEdit(id){const row=state.trades.find(t=>t.trade_id===id);if(!row)re
 async function submitEdit(e){e.preventDefault();const row=state.trades.find(t=>t.trade_id===state.editId);if(!row)return;
   const val={...row,...formTrade(e.currentTarget),last_price_base:row.last_price_base};
   try{await api('/api/trades/'+encodeURIComponent(state.editId),{method:'PUT',body:val});$('edit-dialog').close();
-    state.history={};state.historyRevision=null;inFlightHistory.clear();
+    clearHistoryCache(['investments','nav']);
     await loadTrades();await reloadDashboard();toast('Trade updated');}
   catch(err){toast(err.message,true);}
 }
 async function deleteEdit(){const row=state.trades.find(t=>t.trade_id===state.editId);if(!row)return;
   if(!confirm(`Delete ${row.side} ${row.asset} on ${row.trade_date.slice(0,10)}?`))return;
   try{await api('/api/trades/'+encodeURIComponent(state.editId),{method:'DELETE'});$('edit-dialog').close();
-    state.history={};state.historyRevision=null;inFlightHistory.clear();
+    clearHistoryCache(['investments','nav']);
     await loadTrades();await reloadDashboard();toast('Trade deleted');}catch(e){toast(e.message,true);}
 }
+
+function openCashEdit(id){
+  const row=state.cashTxns.find(t=>t.txn_id===id);if(!row)return;
+  state.editCashId=id;
+  const form=$('edit-cash-form');
+  form.elements.date.value = row.date;
+  form.elements.foreign_ccy.value = row.foreign_ccy;
+  form.elements.txn_type.value = row.txn_type;
+  form.elements.foreign_amount.value = Math.abs(row.foreign_amount);
+  form.elements.fx_rate.value = row.fx_rate;
+  form.elements.fee_foreign.value = row.fee_foreign;
+  form.elements.memo.value = row.memo || '';
+  $('edit-cash-dialog').showModal();
+}
+async function submitCashEdit(e){
+  e.preventDefault();
+  const form=e.currentTarget;
+  const payload={
+    date: form.elements.date.value,
+    foreign_ccy: form.elements.foreign_ccy.value.trim().toUpperCase(),
+    txn_type: form.elements.txn_type.value,
+    foreign_amount: Number(form.elements.foreign_amount.value),
+    fx_rate: Number(form.elements.fx_rate.value),
+    fee_foreign: Number(form.elements.fee_foreign.value || 0),
+    memo: form.elements.memo.value.trim(),
+    auto_fx: false
+  };
+  try{
+    await api('/api/cash/transactions/'+encodeURIComponent(state.editCashId),{method:'PUT',body:payload});
+    $('edit-cash-dialog').close();
+    clearHistoryCache(['cash','nav']);
+    await loadCashTxns();await reloadDashboard();toast('Cash transaction updated');
+  }catch(err){toast(err.message,true);}
+}
+async function deleteCashEdit(){
+  const row=state.cashTxns.find(t=>t.txn_id===state.editCashId);if(!row)return;
+  if(!confirm(`Delete ${row.txn_type} ${row.foreign_ccy} on ${row.date}?`))return;
+  try{
+    await api('/api/cash/transactions/'+encodeURIComponent(state.editCashId),{method:'DELETE'});
+    $('edit-cash-dialog').close();
+    clearHistoryCache(['cash','nav']);
+    await loadCashTxns();await reloadDashboard();toast('Cash transaction deleted');
+  }catch(e){toast(e.message,true);}
+}
+
+// ─── Tax / Realized P/L ────────────────────────────────────────────────────
 function taxDates(){const now=new Date(),end=todayISO();let start;
   switch($('tax-period').value){
     case 'lastyear':start=`${now.getFullYear()-1}-01-01`;return [start,`${now.getFullYear()-1}-12-31`];
@@ -1324,16 +1956,20 @@ function renderTax(report){
   $('tax-value').textContent=trade?'Mixed currencies':fmt(report.total,base,2);
   $('tax-value').style.fontSize=trade?'24px':'';
   $('tax-value').classList.toggle('negative',!trade&&report.total<0);
-  $('tax-count').textContent=`${report.rows.length} assets`;
+  $('tax-count').textContent=`${report.rows.length} ${report.rows.length===1?'item':'items'}`;
   $('tax-list').innerHTML=report.rows.length?report.rows.map(r=>{
-    const ccy=trade?r.currency:base;
-    const item={asset:r.asset,ticker:r.ticker||'',type:r.type||'Stock'};
-    return `<div class="tax-entry"><div class="analytics-row-top tax-row-top"><div class="analytics-identity">${logo(item)}<div class="analytics-title-group"><div class="holding-name">${html(r.asset)}</div><div class="holding-subtitle">Qty ${state.hidden?'••••':quantityFmt(r.quantity_sold)}</div></div></div></div><div class="analytics-row-metrics tax-row-metrics"><div class="analytics-metric"><span>Cost</span><strong>${html(fmt(r.buy_value,ccy,2))}</strong></div><div class="analytics-metric analytics-metric-mid"><span>Proceeds</span><strong>${html(fmt(r.sell_value,ccy,2))}</strong></div><div class="analytics-metric analytics-metric-end"><strong class="tax-pnl ${r.realized<0?'negative':''}">${html(signedFmt(r.realized,ccy,2))}</strong></div></div></div>`;
-  }).join(''):emptyMessage('No realized trades','Sales for the chosen dates will appear here.',null);
+    const isCash = r.type === 'Cash';
+    const ccy = isCash ? base : (trade ? r.currency : base);
+    const iconHtml = isCash ? currencyFlag(r.foreign_ccy || r.asset) : logo({asset:r.asset,ticker:r.ticker||'',type:r.type||'Stock'});
+    const title = isCash ? `${r.asset} (Cash FX)` : r.asset;
+    return `<div class="tax-entry"><div class="analytics-row-top tax-row-top"><div class="analytics-identity">${iconHtml}<div class="analytics-title-group"><div class="holding-name">${html(title)}</div><div class="holding-subtitle">Qty ${state.hidden?'••••':quantityFmt(r.quantity_sold)}</div></div></div></div><div class="analytics-row-metrics tax-row-metrics"><div class="analytics-metric"><span>Cost</span><strong>${html(fmt(r.buy_value,ccy,2))}</strong></div><div class="analytics-metric analytics-metric-mid"><span>Proceeds</span><strong>${html(fmt(r.sell_value,ccy,2))}</strong></div><div class="analytics-metric analytics-metric-end"><strong class="tax-pnl ${r.realized<0?'negative':''}">${html(signedFmt(r.realized,ccy,2))}</strong></div></div></div>`;
+  }).join(''):emptyMessage('No realized trades','Sales and cash FX realizations for the chosen dates will appear here.',null);
   activatePendingLogoSearch($('tax-list'));
   $('tax-note').textContent=(base==='INR'&&!trade?'INR reporting excludes STT from both FIFO cost and proceeds. ':'')+
-    (trade?'Values are not summed because their trade currencies differ. ':'')+'Tax information is informational and should be verified before filing.';
+    (trade?'Values are not summed because their trade currencies differ. ':'')+'FIFO and FX average-cost calculations are informational and should be verified before filing.';
 }
+
+// ─── Account & Data Import/Export ──────────────────────────────────────────
 function renderAccount(){
   if(!state.user)return;
   const initial = (state.user.name||'U')[0].toUpperCase();
@@ -1352,18 +1988,26 @@ function renderAccount(){
 async function changeBase(e){const newBase=e.target.value;const oldBase=state.dashboard.base_currency;
   if(newBase===oldBase)return;
   e.target.disabled=true;
-  try{await api('/api/settings',{method:'PUT',body:{base_currency:newBase}});state.history={};state.historyRevision=null;inFlightHistory.clear();
+  try{await api('/api/settings',{method:'PUT',body:{base_currency:newBase}});clearHistoryCache();
     await reloadDashboard();renderAccount();toast('Base currency changed to '+newBase);
   }catch(error){e.target.value=oldBase;toast(error.message,true);}
   finally{e.target.disabled=false;}
 }
 async function importFile(e){const file=e.target.files[0];if(!file)return;
-  if(!confirm(`Replace your current portfolio with ${file.name}? This overwrites existing trades. Download a backup first if needed.`)) {e.target.value='';return;}
+  if(!confirm(`Replace your current portfolio trades with ${file.name}? This overwrites existing trades. Download a backup first if needed.`)) {e.target.value='';return;}
   const form=new FormData();form.append('file',file);
-  try{const result=await api('/api/import',{method:'POST',body:form});state.history={};state.historyRevision=null;inFlightHistory.clear();state.trades=[];
+  try{const result=await api('/api/import',{method:'POST',body:form});clearHistoryCache(['investments','nav']);state.trades=[];
     await reloadDashboard();toast(`Imported ${result.count} trades successfully`);nav('home');}
   catch(err){toast(err.message,true);}finally{e.target.value='';}
 }
+async function importCashFile(e){const file=e.target.files[0];if(!file)return;
+  if(!confirm(`Replace your current cash transactions with ${file.name}? This overwrites existing cash entries.`)) {e.target.value='';return;}
+  const form=new FormData();form.append('file',file);
+  try{const result=await api('/api/cash/import',{method:'POST',body:form});clearHistoryCache(['cash','nav']);state.cashTxns=[];
+    await reloadDashboard();toast(`Imported ${result.count} cash transactions successfully`);nav('home');}
+  catch(err){toast(err.message,true);}finally{e.target.value='';}
+}
+
 function bindEvents(){
   bindAssetLogoImages();
   bindChartScrub();
@@ -1373,6 +2017,14 @@ function bindEvents(){
       el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();nav(el.dataset.tab);}});
     }
   });
+  $('cash-see-all')?.addEventListener('click',()=>{
+    setAnalyticsMode('cash');
+    nav('analytics');
+  });
+  document.querySelectorAll('[data-dash-mode]').forEach(el=>el.addEventListener('click',()=>setDashboardMode(el.dataset.dashMode)));
+  document.querySelectorAll('[data-analytics-mode]').forEach(el=>el.addEventListener('click',()=>setAnalyticsMode(el.dataset.analyticsMode)));
+  document.querySelectorAll('[data-history-mode]').forEach(el=>el.addEventListener('click',()=>setHistoryMode(el.dataset.historyMode)));
+
   document.addEventListener('click',e=>{
     const target=e.target.closest('[data-go]');
     if(target)nav(target.dataset.go);
@@ -1408,6 +2060,12 @@ function bindEvents(){
     document.querySelectorAll('[data-side-filter]').forEach(b=>b.classList.toggle('active',b===el));
     renderTrades();
   }));
+  document.querySelectorAll('[data-cash-filter]').forEach(el=>el.addEventListener('click',()=>{
+    state.cashFilter = el.dataset.cashFilter;
+    state.tradeLimit = 55;
+    document.querySelectorAll('[data-cash-filter]').forEach(b=>b.classList.toggle('active',b===el));
+    renderCashTxns();
+  }));
   $('refresh-btn').addEventListener('click',refreshPortfolio);
   $('capital-reset').addEventListener('click',()=>{state.capitalFocus=null;renderCapitalChart(true);});
   $('capital-chart').addEventListener('click',e=>{
@@ -1431,29 +2089,67 @@ function bindEvents(){
       await startLoggedIn();}
     catch(error){toast(error.message,true);}finally{btn.disabled=false;}
   });
+
   $('trade-form').elements.trade_date.value=todayISO();
   $('trade-form').addEventListener('submit',submitTrade);
   $('trade-form').addEventListener('input',updateTradePreview);
+  $('trade-asset-type').addEventListener('change',syncTradeFormMode);
   document.querySelectorAll('[data-side]').forEach(el=>el.addEventListener('click',()=>{
     state.tradeSide=el.dataset.side;document.querySelectorAll('[data-side]').forEach(x=>x.classList.toggle('selected',x===el));
   }));
+  document.querySelectorAll('[data-cash-type]').forEach(el=>el.addEventListener('click',()=>{
+    state.cashTxnType=el.dataset.cashType;
+    document.querySelectorAll('[data-cash-type]').forEach(x=>x.classList.toggle('selected',x===el));
+    updateTradePreview();
+  }));
   $('trade-auto-fx').addEventListener('change',e=>{ $('trade-manual-fx').disabled=e.target.checked; });
-  $('history-search').addEventListener('input',()=>{state.tradeLimit=55;renderTrades();});
-  $('history-search-clear')?.addEventListener('click',()=>{$('history-search').value='';state.tradeLimit=55;renderTrades();$('history-search').focus();});
-  $('load-more-trades').addEventListener('click',()=>{state.tradeLimit+=55;renderTrades();});
-  $('trades-list').addEventListener('click',e=>{const row=e.target.closest('[data-edit]');if(row)openEdit(row.dataset.edit);});
+  syncTradeFormMode();
+
+  $('cash-sync-confirm')?.addEventListener('click',confirmCashSync);
+  $('cash-sync-skip')?.addEventListener('click',skipCashSync);
+  $('close-cash-sync')?.addEventListener('click',skipCashSync);
+  $('cash-sync-dialog')?.addEventListener('click',e=>{if(e.target===$('cash-sync-dialog'))skipCashSync();});
+
+  $('history-search').addEventListener('input',()=>{state.tradeLimit=55;renderHistoryList();});
+  $('history-search-clear')?.addEventListener('click',()=>{$('history-search').value='';state.tradeLimit=55;renderHistoryList();$('history-search').focus();});
+  $('load-more-trades').addEventListener('click',()=>{state.tradeLimit+=55;renderHistoryList();});
+  $('trades-list').addEventListener('click',e=>{
+    const cashRow=e.target.closest('[data-edit-cash]');
+    if(cashRow){ openCashEdit(cashRow.dataset.editCash); return; }
+    const row=e.target.closest('[data-edit]');
+    if(row)openEdit(row.dataset.edit);
+  });
   $('close-dialog').addEventListener('click',()=>$('edit-dialog').close());
   $('edit-dialog').addEventListener('click',e=>{if(e.target===$('edit-dialog'))$('edit-dialog').close();});
   $('edit-form').addEventListener('submit',submitEdit);
   $('delete-trade').addEventListener('click',deleteEdit);
+
+  $('close-cash-dialog').addEventListener('click',()=>$('edit-cash-dialog').close());
+  $('edit-cash-dialog').addEventListener('click',e=>{if(e.target===$('edit-cash-dialog'))$('edit-cash-dialog').close();});
+  $('edit-cash-form').addEventListener('submit',submitCashEdit);
+  $('delete-cash-txn').addEventListener('click',deleteCashEdit);
+
   $('tax-period').addEventListener('change',e=>{$('tax-custom').classList.toggle('hidden',e.target.value!=='custom');loadTax();});
   for(const id of ['tax-mode','tax-start','tax-end'])$(id).addEventListener('change',loadTax);
   $('tax-export').addEventListener('click',()=>{const [start,end]=taxDates();window.location.href=`/api/export/tax?start=${start}&end=${end}&mode=${$('tax-mode').value}`;});
   $('base-select').addEventListener('change',changeBase);
   $('file-export').addEventListener('click',()=>{window.location.href='/api/export/trades';});
   $('file-import').addEventListener('change',importFile);
-  $('logout-btn').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});state.user=null;state.dashboard=null;state.trades=[];state.history={};state.historyRevision=null;inFlightHistory.clear();showAuth();toast('Signed out');}catch(e){toast(e.message,true);}});
-  window.addEventListener('resize',()=>{state.chart?.resize();fitCapitalTileLabels($('capital-chart'));});
+  $('cash-file-export').addEventListener('click',()=>{window.location.href='/api/export/cash';});
+  $('cash-file-import').addEventListener('change',importCashFile);
+  $('logout-btn').addEventListener('click',async()=>{
+    try{
+      await api('/api/logout',{method:'POST'});
+      state.user=null;state.dashboard=null;state.trades=[];state.cashTxns=[];
+      clearHistoryCache();showAuth();toast('Signed out');
+    }catch(e){toast(e.message,true);}
+  });
+  window.addEventListener('resize',()=>{
+    state.chart?.resize();
+    state.cashDonutChart?.resize();
+    state.navDonutChart?.resize();
+    fitCapitalTileLabels($('capital-chart'));
+  });
 }
 
 async function startLoggedIn(prefetchedAccount=null){
@@ -1463,8 +2159,8 @@ async function startLoggedIn(prefetchedAccount=null){
   renderAccount();showApp();nav('home');
   $('history-loading').classList.remove('hidden');
   const dashReq = api('/api/dashboard');
-  const histReq = fetchHistorySpan(state.historyRange).catch(err=>{
-    toast('Portfolio history: '+err.message,true);
+  const histReq = fetchHistorySpan(state.historyRange, state.dashboardMode).catch(err=>{
+    toast('Development history: '+err.message,true);
     return null;
   });
   try{
