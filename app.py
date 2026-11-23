@@ -349,8 +349,19 @@ def tax(start:date=Query(default_factory=lambda:date(date.today().year,1,1)),
         user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
     if start>end:raise HTTPException(400,'Start must precede end')
     p=get_owned(user,db)
-    try:return engine.realized_report(data_for(p),p.base_currency,mode,start,end)
+    d=data_for(p)
+    try:report=engine.realized_report(d,p.base_currency,mode,start,end)
     except ValueError as e:raise HTTPException(400,str(e))
+    if report['rows'] and not d.empty:
+        chronological=d.sort_values('trade_date',kind='stable')
+        latest_type=chronological.drop_duplicates('asset',keep='last').set_index('asset')['asset_type'].to_dict()
+        named=chronological[chronological.ticker.astype(str).str.len()>0].drop_duplicates('asset',keep='last')
+        latest_ticker=named.set_index('asset')['ticker'].to_dict()
+        for row in report['rows']:
+            asset=row['asset']
+            row['ticker']=str(latest_ticker.get(asset,''))
+            row['type']=str(latest_type.get(asset,'Stock') or 'Stock')
+    return report
 
 @app.get('/api/export/tax')
 def tax_export(start:date,end:date,mode:str='base',user:str=Depends(session_user),db:DBSession=Depends(db_dep)):
