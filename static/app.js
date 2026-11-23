@@ -1327,8 +1327,10 @@ function renderTax(report){
   $('tax-count').textContent=`${report.rows.length} assets`;
   $('tax-list').innerHTML=report.rows.length?report.rows.map(r=>{
     const ccy=trade?r.currency:base;
-    return `<div class="tax-entry"><div><strong>${html(r.asset)}</strong><strong class="tax-pnl ${r.realized<0?'negative':''}">${html(fmt(r.realized,ccy,2))}</strong></div><small>Sold: ${quantityFmt(r.quantity_sold)} · Cost ${html(fmt(r.buy_value,ccy,2))} · Proceeds ${html(fmt(r.sell_value,ccy,2))}</small></div>`;
+    const item={asset:r.asset,ticker:r.ticker||'',type:r.type||'Stock'};
+    return `<div class="tax-entry"><div class="analytics-row-top tax-row-top"><div class="analytics-identity">${logo(item)}<div class="analytics-title-group"><div class="holding-name">${html(r.asset)}</div></div></div><strong class="tax-pnl ${r.realized<0?'negative':''}">${html(fmt(r.realized,ccy,2))}</strong></div><div class="analytics-row-metrics tax-row-metrics"><div class="analytics-metric"><span>Sold</span><strong>${state.hidden?'••••':quantityFmt(r.quantity_sold)}</strong></div><div class="analytics-metric analytics-metric-mid"><span>Cost</span><strong>${html(fmt(r.buy_value,ccy,2))}</strong></div><div class="analytics-metric analytics-metric-end"><span>Proceeds</span><strong>${html(fmt(r.sell_value,ccy,2))}</strong></div></div></div>`;
   }).join(''):emptyMessage('No realized trades','Sales for the chosen dates will appear here.',null);
+  activatePendingLogoSearch($('tax-list'));
   $('tax-note').textContent=(base==='INR'&&!trade?'INR reporting excludes STT from both FIFO cost and proceeds. ':'')+
     (trade?'Values are not summed because their trade currencies differ. ':'')+'Tax information is informational and should be verified before filing.';
 }
