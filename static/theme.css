@@ -752,7 +752,7 @@ html[data-theme="light"] .asset-icon.has-logo { filter: none; }
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 2px solid var(--border-strong);
   padding: 24px 2px;
 }
 .analytics-entry:first-child { padding-top: 8px; }
@@ -1043,10 +1043,10 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  border-bottom: 1px solid var(--border);
-  padding: 18px 2px;
+  border-bottom: 2px solid var(--border-strong);
+  padding: 13.5px 2px;
 }
-.tax-entry:first-child { padding-top: 6px; }
+.tax-entry:first-child { padding-top: 4.5px; }
 .tax-entry:last-child { border-bottom: 0; }
 .tax-entry > .tax-row-top {
   display: flex;
@@ -1470,7 +1470,7 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .analytics-metric .analytics-pnl-pct { font-size: 11.66px; }
   .analytics-metric span { font-size: 11.13px; }
   .analytics-entry { padding: 22px 2px; }
-  .tax-entry { padding: 16.5px 2px; }
+  .tax-entry { padding: 12px 2px; }
   .tax-entry .tax-pnl { font-size: 13.5px; }
 
   .page-heading { padding: 20px 0 16px; }
