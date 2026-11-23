@@ -34,6 +34,7 @@ import pandas as pd
 import requests
 from sqlalchemy import select
 import portfolio
+import cash as cash_engine
 from storage import MarketCache, Session, engine
 
 _LOG = logging.getLogger('uvicorn.error')
@@ -900,9 +901,9 @@ def get_fx_series(currencies: list[str], base: str, start: date, end: date,
     return output, errors
 
 
-def spot_rates(currencies: list[str], base: str) -> tuple[dict[str, float], list[str]]:
+def spot_rates(currencies: list[str], base: str, force: bool = False) -> tuple[dict[str, float], list[str]]:
     today = date.today()
-    series, _ = get_fx_series(currencies, base, today-timedelta(days=8), today)
+    series, _ = get_fx_series(currencies, base, today-timedelta(days=8), today, force=force)
     rates, warnings = {}, []
     for ccy in currencies:
         if ccy == base:
@@ -947,16 +948,52 @@ def trade_fx_rates(df: pd.DataFrame, base: str, preserve_legacy_sek: bool = Fals
     return output, warns
 
 
+def cash_fx_rates(df: pd.DataFrame, base: str) -> tuple[np.ndarray, list[str]]:
+    """Historical transaction-date FX rates for cash_txns.csv on base-currency switch."""
+    if df.empty:
+        return np.array([]), []
+    base_u = base.upper()
+    start = df['date'].min().date() - timedelta(days=6)
+    end = min(date.today(), df['date'].max().date() + timedelta(days=1))
+    currencies = df['foreign_ccy'].astype(str).str.upper().unique().tolist()
+    series, _ = get_fx_series(currencies, base_u, start, end)
+    output = np.full(len(df), np.nan)
+    warns = []
+    by_ccy = {}
+    full_idx = pd.date_range(start, end)
+    for ccy in currencies:
+        if ccy == base_u:
+            by_ccy[ccy] = pd.Series(1.0, index=full_idx)
+        elif ccy in series and series[ccy]:
+            vals = pd.Series(series[ccy], dtype='float64')
+            vals.index = pd.to_datetime(vals.index)
+            by_ccy[ccy] = vals.reindex(full_idx).ffill().bfill()
+        else:
+            warns.append(f'Cannot calculate historical {ccy} → {base_u} FX for cash transactions.')
+    dates = pd.to_datetime(df['date']).dt.normalize()
+    for ccy, s in by_ccy.items():
+        mask = (df['foreign_ccy'].astype(str).str.upper() == ccy).to_numpy()
+        output[mask] = s.reindex(dates[mask]).to_numpy(dtype=float)
+    return output, warns
+
+
 _HISTORY_COLUMNS = ['trade_date', 'asset', 'side', 'quantity', 'ticker', 'trade_ccy',
                     'price_trade_ccy', 'charges_trade_ccy', 'stt_trade_ccy', 'fx_to_base']
+_CASH_HISTORY_COLUMNS = ['date', 'foreign_ccy', 'txn_type', 'foreign_amount', 'fx_rate', 'fee_foreign']
 
 
-def history_revision(df: pd.DataFrame, base: str) -> str:
+def history_revision(df: pd.DataFrame, base: str,
+                     cash_df: pd.DataFrame | None = None,
+                     mode: str = 'investments') -> str:
     """Identify exactly the ledger and official-close inputs used by the daily chart."""
+    if mode not in ('investments', 'cash', 'nav'):
+        mode = 'investments'
     digest = hashlib.blake2b(digest_size=16)
+    digest.update(mode.encode())
     digest.update(base.encode())
     digest.update(date.today().isoformat().encode())
-    if not df.empty:
+    if mode in ('investments', 'nav') and df is not None and not df.empty:
+        digest.update(b'INV:')
         digest.update(pd.util.hash_pandas_object(df[_HISTORY_COLUMNS], index=False).values.tobytes())
         if _NSE_OFFICIAL_CLOSE and df.ticker.str.upper().str.endswith('.NS').any():
             days = [d for d in _nse_report_dates() if d <= date.today()]
@@ -972,6 +1009,9 @@ def history_revision(df: pd.DataFrame, base: str) -> str:
                 if record and record.values:
                     digest.update((key + record.fetched.isoformat()).encode())
                     break
+    if mode in ('cash', 'nav') and cash_df is not None and not cash_df.empty:
+        digest.update(b'CASH:')
+        digest.update(pd.util.hash_pandas_object(cash_df[_CASH_HISTORY_COLUMNS], index=False).values.tobytes())
     return digest.hexdigest()
 
 
@@ -985,11 +1025,13 @@ def _shallow_chart_copy(result: dict) -> dict:
     }
 
 
-def peek_cached_history(span: str, *, revision: str, owner=None) -> dict | None:
+def peek_cached_history(span: str, *, revision: str, owner=None, mode: str = 'investments') -> dict | None:
     """Instant non-blocking RAM cache check used by /api/refresh."""
     if not revision or span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
         return None
-    key = (owner, revision, span)
+    if mode not in ('investments', 'cash', 'nav'):
+        return None
+    key = (owner, mode, revision, span)
     with _cache_lock:
         hit = _chart_rows.get(key)
         if hit and hit[0] > time.monotonic():
@@ -998,10 +1040,16 @@ def peek_cached_history(span: str, *, revision: str, owner=None) -> dict | None:
     return None
 
 
-def portfolio_history(df: pd.DataFrame, base: str, span: str, *, revision=None, owner=None) -> dict:
+def portfolio_history(df: pd.DataFrame, base: str, span: str, *,
+                      revision=None, owner=None,
+                      cash_df: pd.DataFrame | None = None,
+                      mode: str = 'investments') -> dict:
     if span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
         raise ValueError('Unsupported range')
-    key = (owner, revision or history_revision(df, base), span)
+    if mode not in ('investments', 'cash', 'nav'):
+        raise ValueError('Unsupported history mode')
+    rev = revision or history_revision(df, base, cash_df=cash_df, mode=mode)
+    key = (owner, mode, rev, span)
     with _cache_lock:
         hit = _chart_rows.get(key)
         if hit and hit[0] > time.monotonic():
@@ -1014,10 +1062,10 @@ def portfolio_history(df: pd.DataFrame, base: str, span: str, *, revision=None, 
     if not leader:
         return _shallow_chart_copy(pending.result())
     try:
-        result = _calculate_portfolio_history(df, base, span)
+        result = _calculate_history(df, cash_df, base, span, mode)
         with _cache_lock:
             _chart_rows[key] = (time.monotonic() + 600, result)
-            while len(_chart_rows) > 48:
+            while len(_chart_rows) > 72:
                 _chart_rows.popitem(last=False)
         pending.set_result(result)
         return _shallow_chart_copy(result)
@@ -1036,10 +1084,7 @@ def _daily_frame(frame: pd.DataFrame, days: pd.DatetimeIndex) -> pd.DataFrame:
 
 
 def _daily_fifo_state(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, float]:
-    """Replay trades chronologically with exact portfolio.py FIFO rules on unit_base.
-
-    Returns end-of-day (qty_df, cost_df, cum_realized_series, all_time_realized).
-    """
+    """Replay trades chronologically with exact portfolio.py FIFO rules on unit_base."""
     dd = portfolio.derived(df)
     temp = dd.copy()
     temp['_side_rank'] = np.where(temp.side == 'BUY', 0, 1)
@@ -1091,20 +1136,29 @@ def _daily_fifo_state(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.
     return qty_df, cost_df, r_series, all_time_realized
 
 
-def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
-    """Daily portfolio Development = Unrealized P/L + Realized P/L for the selected timeframe."""
-    if span not in ('1M','3M','6M','1Y','3Y','MAX'): raise ValueError('Unsupported range')
-    if df.empty:
-        return {'points': [], 'warnings': [], 'estimated_assets': [], 'excluded_assets': [],
-                'range': span, 'baseline': 0.0, 'development': 0.0, 'realized_total': 0.0}
-    end = date.today()
-    first = df.trade_date.min().date()
-    days = {'1M':31,'3M':92,'6M':183,'1Y':366,'3Y':1096,'MAX':999999}[span]
-    start = first if span == 'MAX' else max(first, end-timedelta(days=days))
-    if start > end:
-        return {'points': [], 'warnings': [], 'estimated_assets': [], 'excluded_assets': [],
-                'range': span, 'baseline': 0.0, 'development': 0.0, 'realized_total': 0.0}
-    idx = pd.date_range(start, end, freq='D')
+def _daily_cash_state(cash_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, float]:
+    """Replay cash_txns with exact ForexTracker average-cost rules."""
+    computed = cash_engine.recompute_average_cost(cash_df)
+    computed = computed.assign(_day=computed['date'].dt.normalize())
+    end_of_day = computed.drop_duplicates(['_day', 'foreign_ccy'], keep='last')
+    pos_df = end_of_day.pivot(index='_day', columns='foreign_ccy', values='running_position').sort_index().ffill().fillna(0.0)
+    cost_df = end_of_day.pivot(index='_day', columns='foreign_ccy', values='running_cost_base').sort_index().ffill().fillna(0.0)
+    realized_daily = computed.groupby('_day')['realized_pl_base'].sum().sort_index().cumsum()
+    all_time_realized = float(realized_daily.iloc[-1]) if not realized_daily.empty else 0.0
+    return pos_df, cost_df, realized_daily, all_time_realized
+
+
+def _investments_daily_arrays(df: pd.DataFrame, base: str, idx: pd.DatetimeIndex,
+                              start: date, end: date) -> dict:
+    """Compute daily investment value, invested cost, and cumulative development on idx."""
+    n = len(idx)
+    zeros = np.zeros(n, dtype=float)
+    if df is None or df.empty:
+        return {
+            'value': zeros, 'invested': zeros, 'cum_dev': zeros,
+            'realized_total': 0.0, 'warnings': [],
+            'estimated_assets': [], 'excluded_assets': [], 'price_count': 0,
+        }
 
     qty_all, cost_all, realized_series, all_time_realized = _daily_fifo_state(df)
     changes = qty_all.reindex(idx, method='ffill').fillna(0.0)
@@ -1112,27 +1166,15 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     if not realized_series.empty:
         cum_realized = realized_series.reindex(idx, method='ffill').fillna(0.0).to_numpy(dtype=float)
     else:
-        cum_realized = np.zeros(len(idx), dtype=float)
+        cum_realized = np.zeros(n, dtype=float)
 
     active_cols = [col for col in changes.columns if changes[col].gt(1e-9).any()]
-    rebase = (span != 'MAX' and start > first)
-
     if not active_cols:
-        cum_dev = cum_realized
-        baseline = float(cum_dev[0]) if rebase else 0.0
-        dev_series = cum_dev - baseline
-        max_points = 920
-        step = max(1, int(np.ceil(len(idx) / max_points)))
-        take = np.arange(0, len(idx), step)
-        if take[-1] != len(idx) - 1:
-            take = np.r_[take, len(idx) - 1]
-        points = [{'date': idx[i].date().isoformat(), 'value': round(float(dev_series[i]), 2), 'portfolio_value': 0.0, 'invested': 0.0} for i in take]
-        return {'points': points, 'range': span, 'warnings': [],
-                'estimated_assets': [], 'excluded_assets': [], 'price_count': 0,
-                'baseline': round(baseline, 2),
-                'development': round(float(dev_series[-1]), 2),
-                'realized_total': round(all_time_realized, 2),
-                'source': 'Daily development (Unrealized P/L + Realized P/L) using Yahoo Finance daily closes + Frankfurter FX'}
+        return {
+            'value': zeros, 'invested': zeros, 'cum_dev': cum_realized,
+            'realized_total': all_time_realized, 'warnings': [],
+            'estimated_assets': [], 'excluded_assets': [], 'price_count': 0,
+        }
 
     changes = changes[active_cols]
     costs = costs[active_cols]
@@ -1143,7 +1185,6 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     tickers = named.set_index('asset').ticker.reindex(assets).fillna('').tolist()
     ccys = latest.trade_ccy.reindex(assets).tolist()
     market_start = start - timedelta(days=10)
-    begin = time.perf_counter()
     price_keys = {'price:' + t for t in tickers if t}
     fx_keys = {f'fx:{ccy}:{base}' for ccy in ccys if ccy != base}
     if price_keys or fx_keys:
@@ -1155,8 +1196,6 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     else:
         prices, price_errors = get_prices(tickers, market_start, end)
         fxs, fx_errors = get_fx_series(ccys, base, market_start, end)
-    prices_elapsed = time.perf_counter() - begin
-    fx_elapsed = 0.0
     prices = _overlay_official_nse_history(prices, end)
 
     sub_df = df[df.asset.isin(assets)]
@@ -1187,8 +1226,6 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     unknown_assets = unknown.index[unknown].tolist()
     warnings = []
 
-    # Exclude unvalued (missing price or FX) assets from both market value and cost basis
-    # on affected days, matching portfolio.summarize().
     valued_mask = (positive & prices_used.notna() & asset_rates.notna()).to_numpy()
     qty_arr = changes.to_numpy(dtype=float)
     cost_arr = costs.to_numpy(dtype=float)
@@ -1199,29 +1236,202 @@ def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict
     portfolio_daily = np.ascontiguousarray(val_mat).sum(axis=1)
     invested_daily = np.ascontiguousarray(cost_mat).sum(axis=1)
     unrealized_daily = np.ascontiguousarray(val_mat - cost_mat).sum(axis=1)
-
-    # Cumulative Development = Unrealized P/L + Realized P/L
     cum_dev = unrealized_daily + cum_realized
+
+    if price_errors: warnings.append(f'Historical quote errors for {len(price_errors)} ticker(s).')
+    if fx_errors: warnings.append(f'Historical FX errors for {len(fx_errors)} currency pair(s); recorded transaction FX used as an estimate where possible.')
+    if estimated_assets: warnings.append('Some dates use the last trade price as an estimate where market-history quotes are missing.')
+    if unknown_assets: warnings.append('Some assets/dates have no usable quote or FX rate and are omitted from those historical totals.')
+
+    return {
+        'value': portfolio_daily,
+        'invested': invested_daily,
+        'cum_dev': cum_dev,
+        'realized_total': all_time_realized,
+        'warnings': warnings,
+        'estimated_assets': sorted(set(estimated_assets)),
+        'excluded_assets': sorted(set(unknown_assets)),
+        'price_count': len(prices),
+    }
+
+
+def _cash_daily_arrays(cash_df: pd.DataFrame | None, base: str, idx: pd.DatetimeIndex,
+                       start: date, end: date) -> dict:
+    """Compute daily cash value, invested cost, and cumulative FX development on idx."""
+    n = len(idx)
+    zeros = np.zeros(n, dtype=float)
+    if cash_df is None or cash_df.empty:
+        return {
+            'value': zeros, 'invested': zeros, 'cum_dev': zeros,
+            'realized_total': 0.0, 'warnings': [],
+        }
+
+    base_u = base.upper()
+    pos_all, cost_all, realized_series, all_time_realized = _daily_cash_state(cash_df)
+    pos_daily = pos_all.reindex(idx, method='ffill').fillna(0.0)
+    cost_daily = cost_all.reindex(idx, method='ffill').fillna(0.0)
+    if not realized_series.empty:
+        cum_realized = realized_series.reindex(idx, method='ffill').fillna(0.0).to_numpy(dtype=float)
+    else:
+        cum_realized = np.zeros(n, dtype=float)
+
+    active_ccys = [str(c).upper() for c in pos_daily.columns if pos_daily[c].abs().gt(1e-9).any()]
+    if not active_ccys:
+        return {
+            'value': zeros, 'invested': zeros, 'cum_dev': cum_realized,
+            'realized_total': all_time_realized, 'warnings': [],
+        }
+
+    pos_daily = pos_daily[active_ccys]
+    cost_daily = cost_daily[active_ccys]
+    market_start = start - timedelta(days=10)
+    fxs, fx_errors = get_fx_series(active_ccys, base_u, market_start, end)
+
+    rates = _daily_frame(pd.DataFrame(fxs, dtype='float64'), idx).bfill()
+    rates[base_u] = 1.0
+    ccy_rates = rates.reindex(columns=active_ccys).copy()
+
+    missing_ccys = [c for c in active_ccys if c != base_u and not fxs.get(c)]
+    if missing_ccys:
+        sub = cash_df[cash_df['foreign_ccy'].isin(missing_ccys)].assign(day=cash_df['date'].dt.normalize())
+        sub = sub.drop_duplicates(['day', 'foreign_ccy'], keep='last').set_index(['day', 'foreign_ccy'])
+        recorded = _daily_frame(sub['fx_rate'].unstack().reindex(columns=missing_ccys), idx).bfill()
+        ccy_rates[missing_ccys] = recorded
+
+    active_mask = pos_daily.abs().gt(1e-9)
+    valued_mask = (active_mask & ccy_rates.notna()).to_numpy()
+    pos_arr = pos_daily.to_numpy(dtype=float)
+    cost_arr = cost_daily.to_numpy(dtype=float)
+    fx_arr = np.nan_to_num(ccy_rates.to_numpy(dtype=float), nan=0.0)
+    val_mat = np.where(valued_mask, pos_arr * fx_arr, 0.0)
+    cost_mat = np.where(valued_mask, cost_arr, 0.0)
+
+    value_daily = np.ascontiguousarray(val_mat).sum(axis=1)
+    invested_daily = np.ascontiguousarray(cost_mat).sum(axis=1)
+    unrealized_daily = np.ascontiguousarray(val_mat - cost_mat).sum(axis=1)
+    cum_dev = unrealized_daily + cum_realized
+
+    warnings = []
+    if fx_errors:
+        warnings.append(f'Historical cash FX errors for {len(fx_errors)} currency pair(s); recorded transaction FX used where possible.')
+
+    return {
+        'value': value_daily,
+        'invested': invested_daily,
+        'cum_dev': cum_dev,
+        'realized_total': all_time_realized,
+        'warnings': warnings,
+    }
+
+
+def _calculate_history(df: pd.DataFrame, cash_df: pd.DataFrame | None,
+                       base: str, span: str, mode: str) -> dict:
+    """Daily Development = Unrealized P/L + Realized P/L for investments, cash, or NAV."""
+    if span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
+        raise ValueError('Unsupported range')
+    empty_reply = {
+        'points': [], 'warnings': [], 'estimated_assets': [], 'excluded_assets': [],
+        'range': span, 'mode': mode, 'baseline': 0.0, 'development': 0.0, 'realized_total': 0.0,
+    }
+    has_inv = df is not None and not df.empty
+    has_cash = cash_df is not None and not cash_df.empty
+    if mode == 'investments' and not has_inv:
+        return empty_reply
+    if mode == 'cash' and not has_cash:
+        return empty_reply
+    if mode == 'nav' and not has_inv and not has_cash:
+        return empty_reply
+
+    end = date.today()
+    first_candidates = []
+    if mode in ('investments', 'nav') and has_inv:
+        first_candidates.append(df.trade_date.min().date())
+    if mode in ('cash', 'nav') and has_cash:
+        first_candidates.append(cash_df['date'].min().date())
+    first = min(first_candidates)
+    days = {'1M': 31, '3M': 92, '6M': 183, '1Y': 366, '3Y': 1096, 'MAX': 999999}[span]
+    start = first if span == 'MAX' else max(first, end - timedelta(days=days))
+    if start > end:
+        return empty_reply
+
+    begin = time.perf_counter()
+    idx = pd.date_range(start, end, freq='D')
+    rebase = (span != 'MAX' and start > first)
+
+    if mode == 'investments':
+        inv_res = _investments_daily_arrays(df, base, idx, start, end)
+        portfolio_daily = inv_res['value']
+        invested_daily = inv_res['invested']
+        cum_dev = inv_res['cum_dev']
+        all_realized = inv_res['realized_total']
+        warnings = inv_res['warnings']
+        estimated_assets = inv_res['estimated_assets']
+        excluded_assets = inv_res['excluded_assets']
+        price_count = inv_res['price_count']
+    elif mode == 'cash':
+        cash_res = _cash_daily_arrays(cash_df, base, idx, start, end)
+        portfolio_daily = cash_res['value']
+        invested_daily = cash_res['invested']
+        cum_dev = cash_res['cum_dev']
+        all_realized = cash_res['realized_total']
+        warnings = cash_res['warnings']
+        estimated_assets = []
+        excluded_assets = []
+        price_count = 0
+    else:
+        if has_inv and has_cash:
+            cjob = _coord_pool.submit(_cash_daily_arrays, cash_df, base, idx, start, end)
+            inv_res = _investments_daily_arrays(df, base, idx, start, end)
+            cash_res = cjob.result()
+        elif has_inv:
+            inv_res = _investments_daily_arrays(df, base, idx, start, end)
+            cash_res = _cash_daily_arrays(None, base, idx, start, end)
+        else:
+            inv_res = _investments_daily_arrays(pd.DataFrame(), base, idx, start, end)
+            cash_res = _cash_daily_arrays(cash_df, base, idx, start, end)
+        portfolio_daily = inv_res['value'] + cash_res['value']
+        invested_daily = inv_res['invested'] + cash_res['invested']
+        cum_dev = inv_res['cum_dev'] + cash_res['cum_dev']
+        all_realized = inv_res['realized_total'] + cash_res['realized_total']
+        warnings = list(dict.fromkeys(inv_res['warnings'] + cash_res['warnings']))
+        estimated_assets = inv_res['estimated_assets']
+        excluded_assets = inv_res['excluded_assets']
+        price_count = inv_res['price_count']
+
     baseline = float(cum_dev[0]) if rebase else 0.0
     dev_series = cum_dev - baseline
 
-    if price_errors:warnings.append(f'Historical quote errors for {len(price_errors)} ticker(s).')
-    if fx_errors:warnings.append(f'Historical FX errors for {len(fx_errors)} currency pair(s); recorded transaction FX used as an estimate where possible.')
-    if estimated_assets:warnings.append('Some dates use the last trade price as an estimate where market-history quotes are missing.')
-    if unknown_assets:warnings.append('Some assets/dates have no usable quote or FX rate and are omitted from those historical totals.')
+    max_points = 920
+    step = max(1, int(np.ceil(len(idx) / max_points)))
+    take = np.arange(0, len(idx), step)
+    if take[-1] != len(idx) - 1:
+        take = np.r_[take, len(idx) - 1]
+    points = [
+        {
+            'date': idx[i].date().isoformat(),
+            'value': round(float(dev_series[i]), 2),
+            'portfolio_value': round(float(portfolio_daily[i]), 2),
+            'invested': round(float(invested_daily[i]), 2),
+        }
+        for i in take
+    ]
+    _LOG.info('market.history mode=%s span=%s total_seconds=%.2f points=%d',
+              mode, span, time.perf_counter() - begin, len(points))
+    return {
+        'points': points,
+        'range': span,
+        'mode': mode,
+        'warnings': warnings,
+        'estimated_assets': estimated_assets,
+        'excluded_assets': excluded_assets,
+        'price_count': price_count,
+        'baseline': round(baseline, 2),
+        'development': round(float(dev_series[-1]), 2),
+        'realized_total': round(all_realized, 2),
+        'source': 'Daily development (Unrealized P/L + Realized P/L) using Yahoo Finance daily closes + Frankfurter FX',
+    }
 
-    max_points=920
-    step=max(1,int(np.ceil(len(idx)/max_points)))
-    take=np.arange(0,len(idx),step)
-    if take[-1]!=len(idx)-1:take=np.r_[take,len(idx)-1]
-    points=[{'date':idx[i].date().isoformat(),'value':round(float(dev_series[i]),2),'portfolio_value':round(float(portfolio_daily[i]),2),'invested':round(float(invested_daily[i]),2)} for i in take]
-    _LOG.info('market.history span=%s total_seconds=%.2f prices_seconds=%.2f fx_seconds=%.2f assets=%d',
-              span,time.perf_counter()-begin,prices_elapsed,fx_elapsed,len(assets))
-    return {'points':points,'range':span,'warnings':warnings,
-            'estimated_assets':sorted(set(estimated_assets)),
-            'excluded_assets':sorted(set(unknown_assets)),
-            'price_count':len(prices),
-            'baseline':round(baseline,2),
-            'development':round(float(dev_series[-1]),2),
-            'realized_total':round(all_time_realized,2),
-            'source':'Daily development (Unrealized P/L + Realized P/L) using Yahoo Finance daily closes (latest cached NSE official close applied when available) + Frankfurter FX; trade-price estimates flagged'}
+
+def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
+    """Backward-compatible wrapper for investment-only history."""
+    return _calculate_history(df, None, base, span, 'investments')

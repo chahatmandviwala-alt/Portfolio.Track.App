@@ -1,8 +1,9 @@
 """Database-backed user data; PostgreSQL on hosting, SQLite for local development.
 
-Drop-in replacement. Uses a bounded, recycled SQLAlchemy connection pool to
-reduce repeated Supabase TLS connection setup without exhausting free-tier slots.
-There are NO schema changes or data migrations.
+Uses a bounded, recycled SQLAlchemy connection pool to reduce repeated Supabase
+TLS connection setup without exhausting free-tier slots. Adds a separate
+`cash_ledgers` table for cash_txns.csv so existing `portfolios` tables require
+no schema migration.
 """
 from __future__ import annotations
 
@@ -43,6 +44,14 @@ class Portfolio(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False,
                         default=lambda: datetime.now(timezone.utc))
 
+class CashLedger(Base):
+    __tablename__ = 'cash_ledgers'
+    user_key = Column(String(250), primary_key=True)
+    csv_text = Column(Text, nullable=False, default='')
+    version = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+
 class MarketCache(Base):
     __tablename__ = 'market_cache'
     cache_key = Column(String(160), primary_key=True)
@@ -57,15 +66,18 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 
+def _insert_dialect():
+    if engine.dialect.name == 'postgresql':
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert
+    return insert
+
+
 def get_portfolio(session, user_key: str) -> Portfolio:
     p = session.get(Portfolio, user_key)
     if p is None:
-        # Two first reads (dashboard and history) can arrive together. Persist the
-        # same empty ledger once and release the write transaction immediately.
-        if engine.dialect.name == 'postgresql':
-            from sqlalchemy.dialects.postgresql import insert
-        else:
-            from sqlalchemy.dialects.sqlite import insert
+        insert = _insert_dialect()
         session.execute(insert(Portfolio).values(user_key=user_key, csv_text='', base_currency='SEK', version=0)
                         .on_conflict_do_nothing(index_elements=[Portfolio.user_key]))
         session.commit()
@@ -73,6 +85,17 @@ def get_portfolio(session, user_key: str) -> Portfolio:
     return p
 
 
-def touch(p: Portfolio):
-    p.version += 1
-    p.updated_at = datetime.now(timezone.utc)
+def get_cash_ledger(session, user_key: str) -> CashLedger:
+    c = session.get(CashLedger, user_key)
+    if c is None:
+        insert = _insert_dialect()
+        session.execute(insert(CashLedger).values(user_key=user_key, csv_text='', version=0)
+                        .on_conflict_do_nothing(index_elements=[CashLedger.user_key]))
+        session.commit()
+        c = session.get(CashLedger, user_key)
+    return c
+
+
+def touch(rec: Portfolio | CashLedger):
+    rec.version += 1
+    rec.updated_at = datetime.now(timezone.utc)
