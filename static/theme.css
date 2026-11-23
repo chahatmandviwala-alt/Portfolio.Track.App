@@ -1044,9 +1044,9 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   border-radius: 0;
   box-shadow: none;
   border-bottom: 1px solid var(--border);
-  padding: 24px 2px;
+  padding: 18px 2px;
 }
-.tax-entry:first-child { padding-top: 8px; }
+.tax-entry:first-child { padding-top: 6px; }
 .tax-entry:last-child { border-bottom: 0; }
 .tax-entry > .tax-row-top {
   display: flex;
@@ -1469,7 +1469,8 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .analytics-ltp, .analytics-meta-right,
   .analytics-metric .analytics-pnl-pct { font-size: 11.66px; }
   .analytics-metric span { font-size: 11.13px; }
-  .analytics-entry, .tax-entry { padding: 22px 2px; }
+  .analytics-entry { padding: 22px 2px; }
+  .tax-entry { padding: 16.5px 2px; }
   .tax-entry .tax-pnl { font-size: 13.5px; }
 
   .page-heading { padding: 20px 0 16px; }
