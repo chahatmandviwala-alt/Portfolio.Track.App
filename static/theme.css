@@ -1050,9 +1050,9 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   border-radius: 0;
   box-shadow: none;
   border-bottom: 1px solid var(--border);
-  padding: 16px 2px;
+  padding: 14px 2px;
 }
-.tax-entry:first-child { padding-top: 12px; }
+.tax-entry:first-child { padding-top: 14px; }
 .tax-entry:last-child { border-bottom: 0; }
 .tax-entry > .tax-row-top {
   display: flex;
@@ -1483,8 +1483,8 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .analytics-metric span { font-size: 11.13px; }
   .analytics-entry { padding: 22px 2px; }
   .analytics-entry:first-child { padding-top: 14px; }
-  .tax-entry { padding: 14px 2px; }
-  .tax-entry:first-child { padding-top: 9px; }
+  .tax-entry { padding: 12px 2px; }
+  .tax-entry:first-child { padding-top: 12px; }
   .tax-entry .tax-pnl { font-size: 13.5px; }
 
   .page-heading { padding: 20px 0 16px; }
