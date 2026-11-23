@@ -1519,7 +1519,7 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .holding-row { gap: 10px; }
   .asset-icon { width: 41px; height: 41px; flex-basis: 41px; border-radius: 12px; }
   .analytics-row-metrics, .tax-entry > .tax-row-metrics { gap: 6px; }
-  .analytics-metric strong { font-size: 12.8px; }
+  .analytics-metric strong, .tax-entry .tax-pnl { font-size: 12.8px; }
   .sort-pill { padding: 5px 8px; }
 }
 
