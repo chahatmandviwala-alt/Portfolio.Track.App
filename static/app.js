@@ -1661,6 +1661,8 @@ function syncTradeFormMode(){
 
   $('lbl-ccy').textContent = cashMode ? 'Currency' : 'Trade currency';
   $('lbl-fees').textContent = cashMode ? 'Exchange fee' : 'Fees / brokerage';
+  if(cashMode) f.elements.charges_trade_ccy.removeAttribute('min');
+  else f.elements.charges_trade_ccy.min = '0';
 
   $('lbl-stt').textContent = cashMode ? 'Tax / STT (N/A)' : 'Tax / STT';
   sttEl.disabled = cashMode;
