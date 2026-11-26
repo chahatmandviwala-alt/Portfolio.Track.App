@@ -233,7 +233,7 @@ h1, h2, h3, b, strong { color: inherit; }
 .hero-actions-row {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 16px;
   flex-shrink: 0;
   margin-left: auto;
   background: transparent;
@@ -1564,7 +1564,7 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
     margin: 0;
     padding: 20px 18px 14px;
   }
-  .hero-actions-row { gap: 14px; }
+  .hero-actions-row { gap: 10px; }
   .dash-mode-btn,
   .refresh-icon { height: 24px; font-size: 11px; }
   .dash-mode-btn svg,
