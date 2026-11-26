@@ -309,6 +309,7 @@ const localLogoByTicker = Object.freeze({
   '0P0000XV5C.BO':'/static/logos/edelweiss-mutual-fund.png',
   '0P00000FYR.ST':'/static/logos/storebrand.png',
   '0P00000FYN.ST':'/static/logos/storebrand.png',
+  '0P00000FYO.ST':'/static/logos/storebrand.png',
   '0P00005WD7.BO':'/static/logos/icici-prudential.png',
   'IKS.NS':'/static/logos/inventurus-knowledge-solutions.png',
   'EGLNL.XC':'/static/logos/ishares.png',
