@@ -233,7 +233,7 @@ h1, h2, h3, b, strong { color: inherit; }
 .hero-actions-row {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   flex-shrink: 0;
   margin-left: auto;
   background: transparent;
