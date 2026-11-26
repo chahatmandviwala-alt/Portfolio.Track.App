@@ -37,7 +37,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css?v=20">
-  <link rel="stylesheet" href="/static/theme.css?v=31">
+  <link rel="stylesheet" href="/static/theme.css?v=32">
   <link rel="stylesheet" href="/static/logo.css?v=2">
   <script>
     (() => {
@@ -170,17 +170,7 @@
             <div class="hero">
               <div class="eyebrow-row">
                 <span id="hero-title" class="eyebrow">NET ASSET VALUE</span>
-                <button id="refresh-btn" type="button" class="refresh-icon" title="Refresh market prices & FX" aria-label="Refresh market prices and FX">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg>
-                  <span class="refresh-label">Refresh</span>
-                </button>
-              </div>
-              <div class="hero-body-row">
-                <div class="hero-metrics">
-                  <div class="balance-row"><h1 id="total-value" class="total-value">—</h1><span class="currency-pill" id="hero-ccy">SEK</span></div>
-                  <div id="main-change" class="change-line"><span class="pnl-pill">—</span></div>
-                </div>
-                <div class="dash-mode-stack" role="group" aria-label="Select dashboard chart">
+                <div class="hero-actions-row" role="group" aria-label="Select dashboard chart or refresh">
                   <button type="button" class="dash-mode-btn dash-mode-nav active" data-dash-mode="nav" title="Net Asset Value" aria-label="Net Asset Value development" aria-pressed="true">
                     <span>NAV</span>
                   </button>
@@ -190,8 +180,13 @@
                   <button type="button" class="dash-mode-btn" data-dash-mode="cash" title="Cash" aria-label="Cash development" aria-pressed="false">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2h-4.5a2.5 2.5 0 0 0 0 5H20v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M20 11.5h-4.5a.5.5 0 0 0 0 1H20v-1Z"/></svg>
                   </button>
+                  <button id="refresh-btn" type="button" class="dash-mode-btn refresh-icon" title="Refresh market prices & FX" aria-label="Refresh market prices and FX">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg>
+                  </button>
                 </div>
               </div>
+              <div class="balance-row"><h1 id="total-value" class="total-value">—</h1><span class="currency-pill" id="hero-ccy">SEK</span></div>
+              <div id="main-change" class="change-line"><span class="pnl-pill">—</span></div>
               <div class="chart-section"><div id="history-chart" class="history-chart" role="img" aria-label="Portfolio development over time"></div><div id="history-loading" class="chart-wait hidden"><span class="spinner"></span> Building development history…</div></div>
               <div class="range-row" id="ranges"><button class="selected" data-range="1M">1M</button><button data-range="3M">3M</button><button data-range="6M">6M</button><button data-range="1Y">1Y</button><button data-range="3Y">3Y</button><button data-range="MAX">MAX</button></div>
             </div>
