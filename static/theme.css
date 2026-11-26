@@ -1564,7 +1564,7 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
     margin: 0;
     padding: 20px 18px 14px;
   }
-  .hero-actions-row { gap: 10px; }
+  .hero-actions-row { gap: 8px; }
   .dash-mode-btn,
   .refresh-icon { height: 24px; font-size: 11px; }
   .dash-mode-btn svg,
