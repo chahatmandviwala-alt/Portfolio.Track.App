@@ -37,7 +37,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css?v=20">
-  <link rel="stylesheet" href="/static/theme.css?v=28">
+  <link rel="stylesheet" href="/static/theme.css?v=29">
   <link rel="stylesheet" href="/static/logo.css?v=2">
   <script>
     (() => {
@@ -97,7 +97,7 @@
     });
   </script>
   <script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-  <script defer src="/static/app.js?v=29"></script>
+  <script defer src="/static/app.js?v=30"></script>
 </head>
 <body>
   <div class="ambient ambient-left"></div><div class="ambient ambient-right"></div>
@@ -169,27 +169,27 @@
           <div class="home-hero-wrap">
             <div class="hero">
               <div class="eyebrow-row">
-                <span id="hero-title" class="eyebrow">INVESTMENTS</span>
-                <div class="hero-header-actions">
-                  <div class="chart-mode-switch" role="group" aria-label="Select dashboard chart">
-                    <button type="button" class="chart-mode-btn active" data-dash-mode="investments" title="Investments" aria-label="Investments development" aria-pressed="true">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V14"/><path d="M10 20V8"/><path d="M16 20V11"/><path d="M22 20V4"/></svg>
-                    </button>
-                    <button type="button" class="chart-mode-btn" data-dash-mode="cash" title="Cash" aria-label="Cash development" aria-pressed="false">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2h-4.5a2.5 2.5 0 0 0 0 5H20v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M20 11.5h-4.5a.5.5 0 0 0 0 1H20v-1Z"/></svg>
-                    </button>
-                    <button type="button" class="chart-mode-btn chart-mode-nav" data-dash-mode="nav" title="Net Asset Value" aria-label="Net Asset Value development" aria-pressed="false">
-                      <span>NAV</span>
-                    </button>
-                  </div>
-                  <button id="refresh-btn" type="button" class="refresh-icon" title="Refresh market prices & FX" aria-label="Refresh market prices and FX">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg>
-                    <span class="refresh-label">Refresh</span>
-                  </button>
-                </div>
+                <span id="hero-title" class="eyebrow">NET ASSET VALUE</span>
+                <button id="refresh-btn" type="button" class="refresh-icon" title="Refresh market prices & FX" aria-label="Refresh market prices and FX">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8.1 8.1 0 0 0 4.5 9M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/></svg>
+                  <span class="refresh-label">Refresh</span>
+                </button>
               </div>
               <div class="balance-row"><h1 id="total-value" class="total-value">—</h1><span class="currency-pill" id="hero-ccy">SEK</span></div>
               <div id="main-change" class="change-line"><span class="pnl-pill">—</span></div>
+              <div class="dash-mode-row">
+                <div class="chart-mode-switch" role="group" aria-label="Select dashboard chart">
+                  <button type="button" class="chart-mode-btn chart-mode-nav active" data-dash-mode="nav" title="Net Asset Value" aria-label="Net Asset Value development" aria-pressed="true">
+                    <span>NAV</span>
+                  </button>
+                  <button type="button" class="chart-mode-btn" data-dash-mode="investments" title="Investments" aria-label="Investments development" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V14"/><path d="M10 20V8"/><path d="M16 20V11"/><path d="M22 20V4"/></svg>
+                  </button>
+                  <button type="button" class="chart-mode-btn" data-dash-mode="cash" title="Cash" aria-label="Cash development" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2h-4.5a2.5 2.5 0 0 0 0 5H20v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M20 11.5h-4.5a.5.5 0 0 0 0 1H20v-1Z"/></svg>
+                  </button>
+                </div>
+              </div>
               <div class="chart-section"><div id="history-chart" class="history-chart" role="img" aria-label="Portfolio development over time"></div><div id="history-loading" class="chart-wait hidden"><span class="spinner"></span> Building development history…</div></div>
               <div class="range-row" id="ranges"><button class="selected" data-range="1M">1M</button><button data-range="3M">3M</button><button data-range="6M">6M</button><button data-range="1Y">1Y</button><button data-range="3Y">3Y</button><button data-range="MAX">MAX</button></div>
             </div>
@@ -230,12 +230,18 @@
         </section>
 
         <section id="view-analytics" class="view" aria-label="Analytics">
-          <div class="page-heading analytics-page-head">
+          <div class="page-heading page-head-row">
             <h1>Portfolio <em>analytics.</em></h1>
-            <div class="view-mode-switch" role="tablist" aria-label="Analytics view">
-              <button type="button" class="mode-tab active" role="tab" aria-selected="true" data-analytics-mode="investments">Investments</button>
-              <button type="button" class="mode-tab" role="tab" aria-selected="false" data-analytics-mode="cash">Cash</button>
-              <button type="button" class="mode-tab" role="tab" aria-selected="false" data-analytics-mode="nav">Net Asset Value</button>
+            <div class="chart-mode-switch header-mode-switch" role="tablist" aria-label="Analytics view">
+              <button type="button" class="chart-mode-btn active" role="tab" aria-selected="true" data-analytics-mode="investments" title="Investments" aria-label="Investments analytics">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V14"/><path d="M10 20V8"/><path d="M16 20V11"/><path d="M22 20V4"/></svg>
+              </button>
+              <button type="button" class="chart-mode-btn" role="tab" aria-selected="false" data-analytics-mode="cash" title="Cash" aria-label="Cash analytics">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2h-4.5a2.5 2.5 0 0 0 0 5H20v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M20 11.5h-4.5a.5.5 0 0 0 0 1H20v-1Z"/></svg>
+              </button>
+              <button type="button" class="chart-mode-btn chart-mode-nav" role="tab" aria-selected="false" data-analytics-mode="nav" title="Net Asset Value" aria-label="Net Asset Value analytics">
+                <span>NAV</span>
+              </button>
             </div>
           </div>
 
@@ -329,18 +335,18 @@
         </section>
 
         <section id="view-trade" class="view" aria-label="Add a trade">
-          <div class="page-heading"><h1>New <em>trade.</em></h1></div>
-          <div class="section-card form-card">
-            <div id="trade-side-toggle" class="buy-sell">
+          <div class="page-heading page-head-row">
+            <h1>New <em>trade.</em></h1>
+            <div id="trade-side-toggle" class="header-side-switch" role="group" aria-label="Trade side">
               <button type="button" id="side-buy" class="selected" data-side="BUY">Buy</button>
               <button type="button" id="side-sell" data-side="SELL">Sell</button>
             </div>
-            <div id="cash-type-toggle" class="buy-sell cash-txn-toggle hidden">
+            <div id="cash-type-toggle" class="header-side-switch cash-txn-toggle hidden" role="group" aria-label="Cash transaction type">
               <button type="button" class="selected" data-cash-type="Credit">Credit</button>
               <button type="button" data-cash-type="Debit">Debit</button>
-              <button type="button" data-cash-type="Buy">FX Buy</button>
-              <button type="button" data-cash-type="Sell">FX Sell</button>
             </div>
+          </div>
+          <div class="section-card form-card">
             <form id="trade-form">
               <div class="field-grid">
                 <label><span id="lbl-asset">Asset name</span> <input name="asset" placeholder="e.g. APPLE" required></label>
@@ -362,11 +368,15 @@
         </section>
 
         <section id="view-history" class="view" aria-label="Trade history">
-          <div class="page-heading analytics-page-head">
+          <div class="page-heading page-head-row">
             <h1>Transaction <em>history.</em></h1>
-            <div class="view-mode-switch" role="tablist" aria-label="History type">
-              <button type="button" class="mode-tab active" role="tab" aria-selected="true" data-history-mode="trades">Trades</button>
-              <button type="button" class="mode-tab" role="tab" aria-selected="false" data-history-mode="cash">Cash</button>
+            <div class="chart-mode-switch header-mode-switch" role="tablist" aria-label="History type">
+              <button type="button" class="chart-mode-btn active" role="tab" aria-selected="true" data-history-mode="trades" title="Trades" aria-label="Trades history">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V14"/><path d="M10 20V8"/><path d="M16 20V11"/><path d="M22 20V4"/></svg>
+              </button>
+              <button type="button" class="chart-mode-btn" role="tab" aria-selected="false" data-history-mode="cash" title="Cash" aria-label="Cash history">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2v2h-4.5a2.5 2.5 0 0 0 0 5H20v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M20 11.5h-4.5a.5.5 0 0 0 0 1H20v-1Z"/></svg>
+              </button>
             </div>
           </div>
           <div class="history-toolbar">
@@ -418,7 +428,6 @@
             </div>
             <div id="tax-list" class="holdings-list tax-list"></div>
           </div>
-          <p id="tax-note" class="footnote">FIFO and FX average-cost calculations are informational and not tax advice.</p>
         </section>
 
         <section id="view-account" class="view" aria-label="Account and settings">

@@ -291,12 +291,17 @@ h1, h2, h3, b, strong { color: inherit; }
 .pnl-pill.negative { background: var(--red-soft); color: var(--negative); }
 .change-line .muted { color: var(--subtle); }
 
+.dash-mode-row {
+  display: flex;
+  align-items: center;
+  margin: 8px 0 0;
+}
 .chart-section {
-  margin: 12px -14px 4px;
+  margin: 2px -14px 2px;
   position: relative;
 }
 .history-chart {
-  height: 268px;
+  height: 252px;
   width: 100%;
   min-width: 0;
   user-select: none;
@@ -1178,14 +1183,21 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
    Bottom Navigation (Mobile & Tablet)
    ───────────────────────────────────────────────────────────────────────── */
 .bottom-nav {
-  width: 100%;
+  position: fixed;
   left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
   transform: none;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: center;
+  gap: 2px;
   background: var(--overlay);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   border-top: 1px solid var(--border);
-  padding: 6px 12px max(8px, env(safe-area-inset-bottom));
+  padding: 6px max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
 }
 .nav-btn {
   color: var(--subtle);
@@ -1196,13 +1208,44 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   padding: 6px 8px;
   transition: color .15s ease, background .15s ease;
 }
+.bottom-nav .nav-btn {
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  margin: 0;
+  padding: 5px 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+}
+.bottom-nav .nav-btn svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+  margin: 0 auto;
+  flex-shrink: 0;
+}
+.bottom-nav .nav-btn span {
+  display: block;
+  width: 100%;
+  text-align: center;
+  font-size: clamp(9px, 2.5vw, 10.6px);
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .nav-btn.active {
   color: var(--accent);
   background: var(--accent-soft);
 }
 .nav-btn.active svg { color: var(--accent); stroke-width: 2.15; }
 .nav-btn:hover { color: var(--text); }
-.nav-btn[data-tab=trade] { padding-top: 6px; }
+.nav-btn[data-tab=trade],
+.bottom-nav .nav-btn[data-tab=trade] { padding: 5px 2px; }
 
 /* ─────────────────────────────────────────────────────────────────────────
    Toast, Loader, Auth Screen & Edit Dialog
@@ -1394,7 +1437,7 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
     align-items: stretch;
   }
   .hero { padding: 26px 28px 20px; }
-  .history-chart { height: 286px; }
+  .history-chart { height: 270px; }
   .summary-strip {
     flex-direction: column;
     align-items: stretch;
@@ -1467,8 +1510,8 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
     font-size: 11.66px;
   }
   .refresh-icon svg { width: 14px; height: 14px; }
-  .chart-section { margin: 8px -12px 4px; }
-  .history-chart { height: 235px; }
+  .chart-section { margin: 2px -12px 2px; }
+  .history-chart { height: 222px; }
   .range-row button { padding: 9px 2px; }
 
   .summary-strip { padding: 15px 14px; gap: 10px; border-radius: 16px; }
@@ -1501,10 +1544,9 @@ html[data-theme="light"] .primary-btn:hover { background: #146a98; filter: none;
   .tax-total strong { font-size: 33px; }
   .theme-switch button { padding: 7px 10px; }
 
-  .bottom-nav { --nav-height: 68px; padding: 6px 6px max(6px, env(safe-area-inset-bottom)); }
-  .nav-btn { font-size: 10.6px; padding: 5px 2px; border-radius: 10px; }
-  .nav-btn svg { width: 19px; height: 19px; }
-  .nav-btn[data-tab=trade] { padding-top: 5px; }
+  .bottom-nav { --nav-height: 68px; padding: 6px max(6px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left)); }
+  .bottom-nav .nav-btn { height: 46px; padding: 5px 2px; border-radius: 10px; }
+  .bottom-nav .nav-btn svg { width: 19px; height: 19px; }
 }
 
 @media (max-width: 430px) {
@@ -2042,4 +2084,96 @@ html[data-theme="light"] .mode-tab.active {
   .hero-header-actions { margin-left: auto; }
   .flag-icon { width: 36px; height: 36px; flex-basis: 36px; }
   .cash-kpi-value { font-size: 20px; }
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Single-Row Page Headings with Right-Aligned Compact Toggles
+   ───────────────────────────────────────────────────────────────────────── */
+.page-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+.page-head-row h1 {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.header-mode-switch {
+  flex-shrink: 0;
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+}
+.header-mode-switch .chart-mode-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(88, 227, 251, .2);
+  box-shadow: none;
+}
+html[data-theme="light"] .header-mode-switch .chart-mode-btn.active {
+  border-color: rgba(27, 127, 179, .22);
+}
+
+/* Compact Buy/Sell and Credit/Debit Pill in New Trade Header */
+.header-side-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  box-shadow: var(--card-shadow);
+  flex-shrink: 0;
+}
+.header-side-switch button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--subtle);
+  height: 28px;
+  padding: 0 13px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.header-side-switch button:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.header-side-switch button.selected[data-side="BUY"],
+.header-side-switch button.selected[data-cash-type="Credit"],
+.header-side-switch button.selected[data-cash-type="Buy"] {
+  background: var(--positive-soft);
+  color: var(--positive);
+}
+.header-side-switch button.selected[data-side="SELL"],
+.header-side-switch button.selected[data-cash-type="Debit"],
+.header-side-switch button.selected[data-cash-type="Sell"] {
+  background: var(--red-soft);
+  color: var(--negative);
+}
+
+/* Keep Trades & Cash icons sized identically in History list */
+.trades-list .trade-row .asset-icon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 12px;
+}
+
+@media (max-width: 700px) {
+  .page-head-row { gap: 8px; }
+  .page-head-row h1 { font-size: clamp(21px, 5.8vw, 30px); }
+  .header-side-switch button { height: 26px; padding: 0 11px; font-size: 11.5px; }
+  .trades-list .trade-row .asset-icon { width: 38px; height: 38px; flex-basis: 38px; }
+}
+@media (max-width: 430px) {
+  .page-head-row h1 { font-size: clamp(19px, 5.4vw, 24px); }
+  .trades-list .trade-row .asset-icon { width: 36px; height: 36px; flex-basis: 36px; border-radius: 11px; }
 }

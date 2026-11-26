@@ -6,7 +6,7 @@ const state = {
   user:null, dashboard:null, trades:[], cashTxns:[],
   history:{ investments:{}, cash:{}, nav:{} },
   historyRevisions:{ investments:null, cash:null, nav:null },
-  dashboardMode:'investments', analyticsMode:'investments', historyMode:'trades',
+  dashboardMode:'nav', analyticsMode:'investments', historyMode:'trades',
   historyRange:'1M', view:'home', homeSort:'value', sideFilter:'ALL', cashFilter:'ALL',
   tradeSide:'BUY', cashTxnType:'Credit', authMode:'login',
   hidden:localStorage.getItem('track-private')==='true',
@@ -872,9 +872,12 @@ function renderCashAnalytics(){
     listEl.innerHTML = '';
   } else {
     const dark = state.theme === 'dark';
+    const brightPalette = dark
+      ? ['#58e3fb','#68d8ad','#fbbf24','#a78bfa','#fb7185','#38bdf8','#34d399','#f472b6','#fb923c','#818cf8','#2dd4bf','#facc15']
+      : ['#1b7fb3','#168065','#d97706','#7c3aed','#e11d48','#0284c7','#059669','#db2777','#ea580c','#4f46e5','#0d9488','#ca8a04'];
     const items = positiveBalances.map((b, i) => ({
       ...b,
-      color: capitalColors[i % capitalColors.length]
+      color: brightPalette[i % brightPalette.length]
     }));
     if(typeof echarts !== 'undefined'){
       if(state.cashDonutChart && !chartEl.querySelector('canvas')){
@@ -1482,7 +1485,7 @@ function renderChart(series){
     lineStyle:{color:dark?'rgba(255,255,255,.14)':'rgba(38,32,22,.16)',type:'dashed',width:1},
     data:[{yAxis:0}]
   } : undefined;
-  state.chart.setOption({animationDuration:280,grid:{left:4,right:5,top:16,bottom:12,containLabel:false},
+  state.chart.setOption({animationDuration:280,grid:{left:4,right:5,top:8,bottom:10,containLabel:false},
     xAxis:{type:'time',boundaryGap:false,axisLine:{show:false},axisTick:{show:false},axisLabel:{show:false},splitLine:{show:false},min:data[0][0],max:data[data.length-1][0]},
     yAxis:{type:'value',scale:true,axisLabel:{show:false},axisLine:{show:false},axisTick:{show:false},splitLine:{show:false}},
     tooltip:{
@@ -1840,10 +1843,15 @@ function renderTrades(){
     return `${r.asset} ${r.ticker} ${r.trade_ccy} ${r.side}`.toLowerCase().includes(query);
   });
   $('trade-count').textContent=`${rows.length} ${rows.length===1?'trade':'trades'}`;
+  const tickerByAsset = new Map();
+  for(const h of (state.dashboard?.holdings || [])){ if(h.ticker) tickerByAsset.set(h.asset, h.ticker); }
+  for(const t of state.trades){ if(t.ticker && !tickerByAsset.has(t.asset)) tickerByAsset.set(t.asset, t.ticker); }
   target.innerHTML=rows.length?rows.slice(0,state.tradeLimit).map(r=>{
     const total=r.price_trade_ccy*r.quantity;const buy=r.side==='BUY';
-    return `<button class="trade-row" data-edit="${html(r.trade_id)}" type="button"><span class="trade-side ${buy?'buy':'sell'}">${buy?'↗':'↘'}</span><span class="trade-info"><strong>${html(r.asset)} <span class="side-label ${buy?'buy':'sell'}">${buy?'BUY':'SELL'}</span></strong><span>${html(r.trade_date.slice(0,10))} · ${state.hidden?'••••':quantityFmt(r.quantity)} units · ${html(r.ticker||r.asset_type)}</span></span><span class="trade-amount"><strong>${html(fmt(total,r.trade_ccy,2))}</strong><small>${html(fmt(r.price_trade_ccy,r.trade_ccy,2))}/unit</small></span></button>`;
+    const item={asset:r.asset,ticker:r.ticker||tickerByAsset.get(r.asset)||'',type:r.asset_type||'Stock'};
+    return `<button class="trade-row" data-edit="${html(r.trade_id)}" type="button">${logo(item)}<span class="trade-info"><strong>${html(r.asset)} <span class="side-label ${buy?'buy':'sell'}">${buy?'BUY':'SELL'}</span></strong><span>${html(r.trade_date.slice(0,10))} · ${state.hidden?'••••':quantityFmt(r.quantity)} units · ${html(r.ticker||r.asset_type)}</span></span><span class="trade-amount"><strong>${html(fmt(total,r.trade_ccy,2))}</strong><small>${html(fmt(r.price_trade_ccy,r.trade_ccy,2))}/unit</small></span></button>`;
   }).join(''):emptyMessage('No trades found','Try another search or add a new transaction.',null);
+  activatePendingLogoSearch(target);
   $('load-more-trades').classList.toggle('hidden',rows.length<=state.tradeLimit);
 }
 
@@ -1963,12 +1971,11 @@ function renderTax(report){
     const isCash = r.type === 'Cash';
     const ccy = isCash ? base : (trade ? r.currency : base);
     const iconHtml = isCash ? currencyFlag(r.foreign_ccy || r.asset) : logo({asset:r.asset,ticker:r.ticker||'',type:r.type||'Stock'});
-    const title = isCash ? `${r.asset} (Cash FX)` : r.asset;
+    const title = r.asset;
     return `<div class="tax-entry"><div class="analytics-row-top tax-row-top"><div class="analytics-identity">${iconHtml}<div class="analytics-title-group"><div class="holding-name">${html(title)}</div><div class="holding-subtitle">Qty ${state.hidden?'••••':quantityFmt(r.quantity_sold)}</div></div></div></div><div class="analytics-row-metrics tax-row-metrics"><div class="analytics-metric"><span>Cost</span><strong>${html(fmt(r.buy_value,ccy,2))}</strong></div><div class="analytics-metric analytics-metric-mid"><span>Proceeds</span><strong>${html(fmt(r.sell_value,ccy,2))}</strong></div><div class="analytics-metric analytics-metric-end"><strong class="tax-pnl ${r.realized<0?'negative':''}">${html(signedFmt(r.realized,ccy,2))}</strong></div></div></div>`;
   }).join(''):emptyMessage('No realized trades','Sales and cash FX realizations for the chosen dates will appear here.',null);
   activatePendingLogoSearch($('tax-list'));
-  $('tax-note').textContent=(base==='INR'&&!trade?'INR reporting excludes STT from both FIFO cost and proceeds. ':'')+
-    (trade?'Values are not summed because their trade currencies differ. ':'')+'FIFO and FX average-cost calculations are informational and should be verified before filing.';
+
 }
 
 // ─── Account & Data Import/Export ──────────────────────────────────────────
