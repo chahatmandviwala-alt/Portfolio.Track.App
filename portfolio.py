@@ -3,6 +3,8 @@
 No I/O or web requests in this module. Currency conversion occurs in market.py.
 """
 from __future__ import annotations
+from collections import deque
+from dataclasses import dataclass
 from datetime import date, datetime
 from io import StringIO
 import uuid
@@ -36,7 +38,10 @@ def read_trades(csv_text: str) -> pd.DataFrame:
     d['side'] = d['side'].str.upper()
     d['trade_ccy'] = d['trade_ccy'].str.upper()
     for col in NUMERIC_COLS:
-        d[col] = pd.to_numeric(d[col].astype(str).str.replace(',','.',regex=False), errors='coerce').fillna(0.0)
+        s = d[col]
+        if not pd.api.types.is_numeric_dtype(s):
+            s = s.astype(str).str.replace(',','.',regex=False)
+        d[col] = pd.to_numeric(s, errors='coerce').fillna(0.0)
     dt = pd.to_datetime(d['trade_date'], errors='coerce')
     if dt.isna().any():
         raise ValueError('The CSV contains invalid trade dates.')
@@ -109,12 +114,28 @@ def derived(d: pd.DataFrame, fx_by_trade: np.ndarray | None = None) -> pd.DataFr
     fees = out.charges_trade_ccy.to_numpy(dtype=float)
     stt = out.stt_trade_ccy.to_numpy(dtype=float)
     fx = fx_by_trade if fx_by_trade is not None else out.fx_to_base.to_numpy(dtype=float)
-    buy = (out.side == 'BUY').to_numpy()
+    buy = (out.side.to_numpy() == 'BUY')
     gross = n * price
     out['unit_trade'] = (gross + np.where(buy,fees,-fees))/n
     out['unit_base'] = (gross + np.where(buy,fees+stt,-fees-stt))*fx/n
     out['unit_base_no_stt'] = (gross + np.where(buy,fees,-fees))*fx/n
     return out
+
+
+def _trade_date_ns(series: pd.Series) -> np.ndarray:
+    """Return int64 nanosecond timestamps for fast stable sorting and date comparison."""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series.to_numpy(dtype='datetime64[ns]').view('int64')
+    return pd.to_datetime(series).to_numpy(dtype='datetime64[ns]').view('int64')
+
+
+def _fifo_order_and_arrays(d: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, list, np.ndarray, np.ndarray, list]:
+    n_rows = len(d)
+    ts_ns = _trade_date_ns(d['trade_date'])
+    is_buy = (d['side'].to_numpy() == 'BUY')
+    side_rank = np.where(is_buy, 0, 1)
+    order = np.lexsort((np.arange(n_rows, dtype=np.int64), side_rank, ts_ns))
+    return order, ts_ns, d['asset'].tolist(), is_buy, d['quantity'].to_numpy(dtype=float), d['trade_ccy'].tolist()
 
 
 def fifo(d: pd.DataFrame, unit_col: str, start: date | None = None,
@@ -125,84 +146,248 @@ def fifo(d: pd.DataFrame, unit_col: str, start: date | None = None,
     """
     if d.empty:
         return {},[],[]
-    temp = d.copy()
-    temp['_side_rank'] = np.where(temp.side == 'BUY',0,1)
-    temp['_row'] = np.arange(len(temp))
-    temp = temp.sort_values(['trade_date','_side_rank','_row'],kind='stable')
-    positions, realized, warnings = {},[],[]
-    for asset,g in temp.groupby('asset',sort=False):
-        lots=[]; total_realized=total_buy=total_sell=sold=0.0
-        for row in g.itertuples(index=False):
-            n=float(row.quantity); unit=float(getattr(row,unit_col)); dt=row.trade_date.date()
-            if row.side == 'BUY':
-                lots.append([n,unit]); continue
-            left=n
-            while left > 1e-9 and lots:
-                lot=lots[0]; qty=min(left,lot[0]); left-=qty; lot[0]-=qty
-                if (start is None or dt>=start) and (end is None or dt<=end):
-                    total_realized += (unit-lot[1])*qty
-                    total_buy += lot[1]*qty
-                    total_sell += unit*qty
-                    sold += qty
-                if lot[0] <= 1e-9: lots.pop(0)
-            if left>1e-6:
-                warnings.append(f'{asset}: sell exceeds earlier buys by {left:.6g} units (unmatched amount excluded from FIFO P/L).')
-        rem=sum(lot[0] for lot in lots)
-        cost=sum(lot[0]*lot[1] for lot in lots)
-        positions[asset]={'quantity':rem,'cost':cost,'avg':cost/rem if rem else 0}
-        if sold>1e-9:
-            realized.append({'asset':asset,'quantity_sold':sold,'buy_value':total_buy,
-                             'sell_value':total_sell,'realized':total_realized,
-                             'currency':str(g.trade_ccy.iloc[0])})
-    return positions,realized,warnings
+    order, ts_ns, assets, is_buy, qtys, ccys = _fifo_order_and_arrays(d)
+    units = d[unit_col].to_numpy(dtype=float)
+    has_range = start is not None or end is not None
+    # Compare by calendar day (floor to day in ns = 86_400_000_000_000 ns) matching row.trade_date.date().
+    day_ns = 86_400_000_000_000
+    start_day = (pd.Timestamp(start).value // day_ns) if start is not None else None
+    end_day = (pd.Timestamp(end).value // day_ns) if end is not None else None
+
+    # Per-asset state: [lots_deque, total_realized, total_buy, total_sell, sold, first_ccy, warns_list]
+    states: dict[str, list] = {}
+    for idx in order:
+        asset = assets[idx]
+        st = states.get(asset)
+        if st is None:
+            st = [deque(), 0.0, 0.0, 0.0, 0.0, str(ccys[idx]), []]
+            states[asset] = st
+        n = float(qtys[idx])
+        unit = float(units[idx])
+        if is_buy[idx]:
+            st[0].append([n, unit])
+            continue
+        lots = st[0]
+        left = n
+        if has_range:
+            d_day = int(ts_ns[idx]) // day_ns
+            in_range = (start_day is None or d_day >= start_day) and (end_day is None or d_day <= end_day)
+        else:
+            in_range = True
+        while left > 1e-9 and lots:
+            lot = lots[0]
+            qty = left if left < lot[0] else lot[0]
+            left -= qty
+            lot[0] -= qty
+            if in_range:
+                st[1] += (unit - lot[1]) * qty
+                st[2] += lot[1] * qty
+                st[3] += unit * qty
+                st[4] += qty
+            if lot[0] <= 1e-9:
+                lots.popleft()
+        if left > 1e-6:
+            st[6].append(f'{asset}: sell exceeds earlier buys by {left:.6g} units (unmatched amount excluded from FIFO P/L).')
+
+    positions, realized, warnings = {}, [], []
+    for asset, st in states.items():
+        lots, total_realized, total_buy, total_sell, sold, first_ccy, asset_warns = st
+        if asset_warns:
+            warnings.extend(asset_warns)
+        rem = sum(lot[0] for lot in lots)
+        cost = sum(lot[0] * lot[1] for lot in lots)
+        positions[asset] = {'quantity': rem, 'cost': cost, 'avg': cost / rem if rem else 0}
+        if sold > 1e-9:
+            realized.append({'asset': asset, 'quantity_sold': sold, 'buy_value': total_buy,
+                             'sell_value': total_sell, 'realized': total_realized,
+                             'currency': first_ccy})
+    return positions, realized, warnings
+
+
+@dataclass(frozen=True)
+class OpenAssetRecord:
+    asset: str
+    ticker: str
+    asset_type: str
+    trade_ccy: str
+    quantity: float
+    invested_base: float
+    invested_trade: float
+    avg_trade: float
+    last_price: float | None
+
+
+@dataclass(frozen=True)
+class SummaryState:
+    open_assets: tuple[OpenAssetRecord, ...]
+    base_warnings: tuple[str, ...]
+    realized_total: float
+    open_tickers: tuple[str, ...]
+    open_currencies: tuple[str, ...]
+
+
+def _extract_last_prices(d: pd.DataFrame, target_assets: set[str]) -> dict[str, float]:
+    """Single linear scan matching `rows[rows.last_price_trade_ccy > 0].iloc[-1]` per asset."""
+    out: dict[str, float] = {}
+    if d.empty or not target_assets:
+        return out
+    assets = d['asset'].tolist()
+    prices = d['last_price_trade_ccy'].to_numpy(dtype=float)
+    for asset, px in zip(assets, prices):
+        if asset in target_assets and px > 0:
+            out[asset] = float(px)
+    return out
+
+
+def build_summary_state(d: pd.DataFrame) -> SummaryState:
+    """Precompute FX-independent FIFO positions, realized total, and per-asset metadata."""
+    if d.empty:
+        return SummaryState((), (), 0.0, (), ())
+    dd = derived(d)
+    pb, rb, w = fifo(dd, 'unit_base')
+    pt, _, _ = fifo(dd, 'unit_trade')
+    realized_total = round(sum(r['realized'] for r in rb), 2)
+
+    open_names = [asset for asset, rec in pb.items() if rec['quantity'] > 1e-6]
+    if not open_names:
+        return SummaryState((), tuple(dict.fromkeys(w)), realized_total, (), ())
+    open_set = set(open_names)
+
+    # Single linear scan in CSV order to collect last row fields, last positive price, and newest ticker.
+    assets = d['asset'].tolist()
+    ccys = d['trade_ccy'].tolist()
+    types = d['asset_type'].tolist()
+    tickers = d['ticker'].tolist()
+    prices = d['last_price_trade_ccy'].to_numpy(dtype=float)
+    ts_ns = _trade_date_ns(d['trade_date'])
+
+    last_ccy: dict[str, str] = {}
+    last_type: dict[str, str] = {}
+    last_price: dict[str, float] = {}
+    best_ticker: dict[str, tuple[int, str]] = {}
+
+    for i, asset in enumerate(assets):
+        if asset not in open_set:
+            continue
+        last_ccy[asset] = str(ccys[i])
+        last_type[asset] = str(types[i])
+        px = float(prices[i])
+        if px > 0:
+            last_price[asset] = px
+        tk = str(tickers[i]) if tickers[i] is not None else ''
+        if tk:
+            t_val = int(ts_ns[i])
+            prev = best_ticker.get(asset)
+            if prev is None or t_val >= prev[0]:
+                best_ticker[asset] = (t_val, tk)
+
+    records: list[OpenAssetRecord] = []
+    symbols: set[str] = set()
+    open_ccys: list[str] = []
+    seen_ccys: set[str] = set()
+    for asset in open_names:
+        rec = pb[asset]
+        t_rec = pt.get(asset)
+        tk = best_ticker[asset][1] if asset in best_ticker else ''
+        if tk:
+            symbols.add(tk)
+        t_ccy = last_ccy[asset]
+        if t_ccy and t_ccy not in seen_ccys:
+            seen_ccys.add(t_ccy)
+            open_ccys.append(t_ccy)
+        records.append(OpenAssetRecord(
+            asset=asset,
+            ticker=tk,
+            asset_type=last_type[asset],
+            trade_ccy=t_ccy,
+            quantity=rec['quantity'],
+            invested_base=rec['cost'],
+            invested_trade=t_rec['cost'] if t_rec else 0,
+            avg_trade=t_rec['avg'] if t_rec else 0,
+            last_price=last_price.get(asset),
+        ))
+    return SummaryState(
+        open_assets=tuple(records),
+        base_warnings=tuple(dict.fromkeys(w)),
+        realized_total=realized_total,
+        open_tickers=tuple(sorted(symbols)),
+        open_currencies=tuple(open_ccys),
+    )
+
+
+def refresh_summary_state_prices(state: SummaryState, d: pd.DataFrame) -> SummaryState:
+    """Clone SummaryState with updated last_price_trade_ccy from d without re-running FIFO."""
+    if not state.open_assets:
+        return state
+    target = {rec.asset for rec in state.open_assets}
+    latest_px = _extract_last_prices(d, target)
+    updated = tuple(
+        OpenAssetRecord(
+            asset=rec.asset,
+            ticker=rec.ticker,
+            asset_type=rec.asset_type,
+            trade_ccy=rec.trade_ccy,
+            quantity=rec.quantity,
+            invested_base=rec.invested_base,
+            invested_trade=rec.invested_trade,
+            avg_trade=rec.avg_trade,
+            last_price=latest_px.get(rec.asset),
+        )
+        for rec in state.open_assets
+    )
+    return SummaryState(
+        open_assets=updated,
+        base_warnings=state.base_warnings,
+        realized_total=state.realized_total,
+        open_tickers=state.open_tickers,
+        open_currencies=state.open_currencies,
+    )
+
+
+def summarize_from_state(state: SummaryState, base: str, spot_fx: dict[str,float]) -> dict:
+    """Evaluate current holdings and totals from precomputed SummaryState and spot FX."""
+    if not state.open_assets and not state.base_warnings:
+        return {'holdings':[],'totals':{'value':0,'invested':0,'pnl':0,'pnl_pct':0,'assets':0},'warnings':[]}
+    holdings = []
+    warnings = list(state.base_warnings)
+    for rec in state.open_assets:
+        trade_ccy = rec.trade_ccy
+        rate = spot_fx.get(trade_ccy)
+        if rate is None:
+            warnings.append(f'No verified {trade_ccy} → {base} FX rate. {rec.asset} excluded from market value.')
+        last_price = rec.last_price
+        est = last_price is None
+        trade_cost = rec.invested_trade
+        if est:
+            trade_value = trade_cost
+            warnings.append(f'{rec.asset}: latest price missing; using trade-currency cost basis as estimate.')
+        else:
+            trade_value = rec.quantity * last_price
+        base_value = trade_value * rate if rate is not None else None
+        invest = rec.invested_base
+        gain_trade = trade_value - trade_cost
+        holdings.append({'asset':rec.asset,'ticker':rec.ticker,'type':rec.asset_type,
+                         'currency':trade_ccy,'quantity':rec.quantity,
+                         'ltp':last_price, 'avg':rec.avg_trade,
+                         'value_trade':trade_value,'invested_trade':trade_cost,
+                         'pnl_trade':gain_trade,'pnl_trade_pct':100*gain_trade/trade_cost if trade_cost else 0,
+                         'value':base_value,'invested':invest,'pnl':base_value-invest if base_value is not None else None,
+                         'estimated':est})
+    total = sum(h['value'] or 0 for h in holdings)
+    invested = sum(h['invested'] for h in holdings if h['value'] is not None)
+    for h in holdings:
+        h['share'] = 100 * (h['value'] or 0) / total if total else 0
+    holdings.sort(key=lambda h: h['value'] or 0, reverse=True)
+    return {'holdings':holdings,'totals':{'value':total,'invested':invested,
+               'pnl':total-invested,'pnl_pct':100*(total-invested)/invested if invested else 0,
+               'assets':len(holdings)},'warnings':list(dict.fromkeys(warnings))}
 
 
 def summarize(d: pd.DataFrame, base: str, spot_fx: dict[str,float]) -> dict:
     """Market values use available last-traded prices; never silently infer a missing FX rate."""
     if d.empty:
         return {'holdings':[],'totals':{'value':0,'invested':0,'pnl':0,'pnl_pct':0,'assets':0},'warnings':[]}
-    dd=derived(d)
-    pb,_,w=fifo(dd,'unit_base')
-    pt,_,_=fifo(dd,'unit_trade')
-    holdings=[]; warnings=list(dict.fromkeys(w))
-    for asset, rec in pb.items():
-        if rec['quantity'] <= 1e-6: continue
-        rows=d[d.asset==asset]
-        row=rows.iloc[-1]  # CSV order; use newest non-empty ticker below
-        trade_ccy=str(row.trade_ccy)
-        prices=rows[rows.last_price_trade_ccy>0]
-        last_price=float(prices.iloc[-1].last_price_trade_ccy) if not prices.empty else None
-        latest_ticker=rows[rows.ticker.astype(str).str.len()>0].sort_values('trade_date')
-        ticker=str(latest_ticker.iloc[-1].ticker) if not latest_ticker.empty else ''
-        rate=spot_fx.get(trade_ccy)
-        if rate is None:
-            warnings.append(f'No verified {trade_ccy} → {base} FX rate. {asset} excluded from market value.')
-        # If no quote: use original app's cost-basis fallback but label clearly.
-        est=last_price is None
-        trade_cost=pt.get(asset,{}).get('cost',0)
-        if est:
-            trade_value=trade_cost
-            warnings.append(f'{asset}: latest price missing; using trade-currency cost basis as estimate.')
-        else:
-            trade_value=rec['quantity']*last_price
-        base_value=trade_value*rate if rate is not None else None
-        # Actual base economic cost FIFO, not using current FX.
-        invest=rec['cost']
-        gain_trade=trade_value-trade_cost
-        holdings.append({'asset':asset,'ticker':ticker,'type':str(row.asset_type),
-                         'currency':trade_ccy,'quantity':rec['quantity'],
-                         'ltp':last_price, 'avg':pt.get(asset,{}).get('avg',0),
-                         'value_trade':trade_value,'invested_trade':trade_cost,
-                         'pnl_trade':gain_trade,'pnl_trade_pct':100*gain_trade/trade_cost if trade_cost else 0,
-                         'value':base_value,'invested':invest,'pnl':base_value-invest if base_value is not None else None,
-                         'estimated':est})
-    total=sum(h['value'] or 0 for h in holdings)
-    invested=sum(h['invested'] for h in holdings if h['value'] is not None)
-    for h in holdings: h['share']=100*(h['value'] or 0)/total if total else 0
-    holdings.sort(key=lambda h: h['value'] or 0, reverse=True)
-    return {'holdings':holdings,'totals':{'value':total,'invested':invested,
-               'pnl':total-invested,'pnl_pct':100*(total-invested)/invested if invested else 0,
-               'assets':len(holdings)},'warnings':list(dict.fromkeys(warnings))}
+    return summarize_from_state(build_summary_state(d), base, spot_fx)
 
 
 def realized_report(d:pd.DataFrame,base:str,mode:str,start:date,end:date)->dict:

@@ -6,6 +6,7 @@ processed before Sell/Debit).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from io import StringIO
 import uuid
@@ -80,11 +81,10 @@ def read_cash_txns(csv_text: str) -> pd.DataFrame:
         raise ValueError('Cash transaction type must be Buy, Sell, Debit, or Credit (got: ' + ', '.join(bad) + ').')
     d['txn_type'] = mapped
     for col in CASH_NUMERIC_COLS:
-        d[col] = (
-            d[col].astype(str).str.replace(',', '.', regex=False)
-            .pipe(pd.to_numeric, errors='coerce')
-            .fillna(0.0)
-        )
+        s = d[col]
+        if not pd.api.types.is_numeric_dtype(s):
+            s = s.astype(str).str.replace(',', '.', regex=False)
+        d[col] = pd.to_numeric(s, errors='coerce').fillna(0.0)
     dt = pd.to_datetime(d['date'], errors='coerce')
     if dt.isna().any():
         raise ValueError('The cash CSV contains invalid transaction dates.')
@@ -166,30 +166,40 @@ def recompute_average_cost(trades_df: pd.DataFrame) -> pd.DataFrame:
         return out
 
     df = trades_df.copy()
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    df = df.reset_index(drop=False).rename(columns={'index': '_orig_idx'})
+    if not pd.api.types.is_datetime64_any_dtype(df['date']):
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df['_orig_idx'] = np.arange(len(df), dtype=np.int64)
     df['_day'] = df['date'].dt.normalize()
 
-    order_map = {'BUY': 0, 'CREDIT': 0, 'SELL': 1, 'DEBIT': 1}
-    df['txn_order'] = df['txn_type'].astype(str).str.upper().map(order_map).fillna(2)
+    order_map = {'BUY': 0, 'CREDIT': 0, 'SELL': 1, 'DEBIT': 1,
+                 'Buy': 0, 'Credit': 0, 'Sell': 1, 'Debit': 1}
+    raw_types = df['txn_type']
+    txn_order = raw_types.map(order_map)
+    if txn_order.isna().any():
+        txn_order = raw_types.astype(str).str.upper().map(order_map).fillna(2)
+    df['txn_order'] = txn_order
     df = df.sort_values(['_day', 'foreign_ccy', 'txn_order', '_orig_idx'], kind='stable')
 
     for col in CASH_NUMERIC_COLS:
         if col not in df.columns:
             df[col] = 0.0
-        df[col] = (
-            df[col].astype(str).str.replace(',', '.', regex=False)
-            .pipe(pd.to_numeric, errors='coerce')
-            .fillna(0.0)
-        )
+        elif not pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = (
+                df[col].astype(str).str.replace(',', '.', regex=False)
+                .pipe(pd.to_numeric, errors='coerce')
+                .fillna(0.0)
+            )
+        else:
+            if df[col].isna().any():
+                df[col] = df[col].fillna(0.0)
 
     f_amt_arr = df['foreign_amount'].to_numpy(dtype=float)
     fx_arr = df['fx_rate'].to_numpy(dtype=float)
     fee_f_arr = df['fee_foreign'].to_numpy(dtype=float)
     base_amt_arr = f_amt_arr * fx_arr
     fee_base_arr = fee_f_arr * fx_arr
-    ccy_list = df['foreign_ccy'].astype(str).str.upper().tolist()
-    type_list = df['txn_type'].astype(str).str.upper().tolist()
+    ccy_list = [str(c).upper() for c in df['foreign_ccy'].tolist()]
+    type_list = [str(t).upper() for t in df['txn_type'].tolist()]
 
     n_rows = len(df)
     realized_arr = np.zeros(n_rows, dtype=float)
@@ -256,10 +266,61 @@ def recompute_average_cost(trades_df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=['txn_order', '_orig_idx', '_day'])
 
 
-def summarize_cash(df: pd.DataFrame, base: str, spot_fx: dict[str, float]) -> dict:
-    """Summarize active cash balances and unrealized/realized FX P/L in base currency."""
-    base_u = base.upper()
+@dataclass(frozen=True)
+class ActiveCashRecord:
+    currency: str
+    amount: float
+    cost_base: float
+    avg_cost: float
+    realized: float
+
+
+@dataclass(frozen=True)
+class CashSummaryState:
+    active_balances: tuple[ActiveCashRecord, ...]
+    all_realized: float
+    open_currencies: tuple[str, ...]
+
+
+def build_cash_summary_state(df: pd.DataFrame, computed: pd.DataFrame | None = None) -> CashSummaryState:
+    """Precompute FX-independent active cash balances and realized totals."""
     if df.empty:
+        return CashSummaryState((), 0.0, ())
+    comp = computed if computed is not None else recompute_average_cost(df)
+    ccys = comp['foreign_ccy'].tolist()
+    r_pos = comp['running_position'].to_numpy(dtype=float)
+    r_cost = comp['running_cost_base'].to_numpy(dtype=float)
+    r_avg = comp['running_avg_cost'].to_numpy(dtype=float)
+    r_pl = comp['realized_pl_base'].to_numpy(dtype=float)
+    all_realized = float(r_pl.sum())
+
+    latest_by_ccy: dict[str, tuple[float, float, float]] = {}
+    realized_by_ccy: dict[str, float] = {}
+    for i, raw_ccy in enumerate(ccys):
+        ccy = str(raw_ccy).upper()
+        latest_by_ccy[ccy] = (float(r_pos[i]), float(r_cost[i]), float(r_avg[i]))
+        realized_by_ccy[ccy] = realized_by_ccy.get(ccy, 0.0) + float(r_pl[i])
+
+    active: list[ActiveCashRecord] = []
+    open_ccys: list[str] = []
+    for ccy, (pos, cost_base, avg_cost) in latest_by_ccy.items():
+        if abs(pos) < 1e-9:
+            continue
+        open_ccys.append(ccy)
+        active.append(ActiveCashRecord(
+            currency=ccy,
+            amount=pos,
+            cost_base=cost_base,
+            avg_cost=avg_cost,
+            realized=float(realized_by_ccy.get(ccy, 0.0)),
+        ))
+    return CashSummaryState(tuple(active), all_realized, tuple(open_ccys))
+
+
+def summarize_cash_from_state(state: CashSummaryState, base: str, spot_fx: dict[str, float]) -> dict:
+    """Evaluate active cash balances and unrealized/realized FX P/L from precomputed state."""
+    base_u = base.upper()
+    if not state.active_balances and abs(state.all_realized) < 1e-12:
         return {
             'balances': [],
             'totals': {
@@ -268,20 +329,14 @@ def summarize_cash(df: pd.DataFrame, base: str, spot_fx: dict[str, float]) -> di
             },
             'warnings': [],
         }
-    computed = recompute_average_cost(df)
-    all_realized = float(computed['realized_pl_base'].sum())
-    latest = computed.groupby('foreign_ccy', as_index=False, sort=False).tail(1)
-    realized_by_ccy = computed.groupby('foreign_ccy')['realized_pl_base'].sum().to_dict()
 
     balances = []
     warnings: list[str] = []
-    for _, row in latest.iterrows():
-        pos = float(row['running_position'])
-        if abs(pos) < 1e-9:
-            continue
-        ccy = str(row['foreign_ccy']).upper()
-        cost_base = float(row['running_cost_base'])
-        avg_cost = float(row['running_avg_cost'])
+    for rec in state.active_balances:
+        ccy = rec.currency
+        pos = rec.amount
+        cost_base = rec.cost_base
+        avg_cost = rec.avg_cost
         rate = 1.0 if ccy == base_u else spot_fx.get(ccy)
         if rate is None:
             warnings.append(f'No verified {ccy} → {base_u} FX rate for cash balance; excluded from valuation.')
@@ -302,7 +357,7 @@ def summarize_cash(df: pd.DataFrame, base: str, spot_fx: dict[str, float]) -> di
             'value': val_base,
             'pnl': pnl_base,
             'pnl_pct': pnl_pct,
-            'realized': float(realized_by_ccy.get(ccy, 0.0)),
+            'realized': rec.realized,
             'is_base': ccy == base_u,
         })
 
@@ -322,22 +377,38 @@ def summarize_cash(df: pd.DataFrame, base: str, spot_fx: dict[str, float]) -> di
             'invested': total_cost,
             'pnl': total_pnl,
             'pnl_pct': (100.0 * total_pnl / total_cost) if abs(total_cost) > 1e-9 else 0.0,
-            'realized_total': round(all_realized, 2),
+            'realized_total': round(state.all_realized, 2),
             'currencies': len(balances),
         },
         'warnings': list(dict.fromkeys(warnings)),
     }
 
 
-def realized_cash_report(df: pd.DataFrame, base: str, start: date, end: date) -> list[dict]:
+def summarize_cash(df: pd.DataFrame, base: str, spot_fx: dict[str, float],
+                   computed: pd.DataFrame | None = None) -> dict:
+    """Summarize active cash balances and unrealized/realized FX P/L in base currency."""
+    if df.empty:
+        return {
+            'balances': [],
+            'totals': {
+                'value': 0.0, 'invested': 0.0, 'pnl': 0.0, 'pnl_pct': 0.0,
+                'realized_total': 0.0, 'currencies': 0,
+            },
+            'warnings': [],
+        }
+    return summarize_cash_from_state(build_cash_summary_state(df, computed=computed), base, spot_fx)
+
+
+def realized_cash_report(df: pd.DataFrame, base: str, start: date, end: date,
+                         computed: pd.DataFrame | None = None) -> list[dict]:
     """Realized FX P/L per currency in [start, end] matching ForexTracker's Realized P/L tab."""
     if df.empty:
         return []
     base_u = base.upper()
-    computed = recompute_average_cost(df)
-    dates = computed['date'].dt.date
-    mask = (dates >= start) & (dates <= end) & computed['txn_type'].isin(['Sell', 'Debit'])
-    sub = computed[mask]
+    comp = computed if computed is not None else recompute_average_cost(df)
+    dates = comp['date'].dt.date
+    mask = (dates >= start) & (dates <= end) & comp['txn_type'].isin(['Sell', 'Debit'])
+    sub = comp[mask]
     if sub.empty:
         return []
     rows = []

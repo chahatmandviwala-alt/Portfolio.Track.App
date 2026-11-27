@@ -102,7 +102,7 @@ async function api(url,options={}){
   let res;
   try {res=await fetch(url,config);}catch(e){throw new Error('Unable to reach server. Check your connection.');}
   if(!res.ok){let d={};try{d=await res.json();}catch(_){};
-    if(res.status===401 && state.user){state.user=null;showAuth();}
+    if(res.status===401 && state.user){localStorage.removeItem('track-authed');state.user=null;showAuth();}
     throw new Error(typeof d.detail==='string'?d.detail:`Request failed (${res.status})`);
   }
   return res.status===204?{}:res.json();
@@ -131,7 +131,7 @@ function applyTheme(theme){
   syncQuickThemeIcons();
   if(state.dashboard){
     renderDashboard();
-    renderAnalytics();
+    if(state.view === 'analytics') renderAnalytics();
     renderChart(currentHistorySeries());
   }
 }
@@ -144,7 +144,7 @@ function toggleHidden(value){
   }
   if(state.dashboard){
     renderDashboard();
-    renderAnalytics();
+    if(state.view === 'analytics') renderAnalytics();
     renderChart(currentHistorySeries());
   }
   if(state.lastTax)renderTax(state.lastTax);
@@ -1519,7 +1519,7 @@ function renderChart(series){
     const path=ys.map((y,i)=>`${i?'L':'M'} ${(i/(ys.length-1||1)*width).toFixed(1)} ${(height-pad-(y-min)/(max-min||1)*(height-2*pad)).toFixed(1)}`).join(' ');
     target.innerHTML=`<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:100%" preserveAspectRatio="none" role="img"><path d="${path}" fill="none" stroke="${color}" stroke-width="2.6" vector-effect="non-scaling-stroke"/></svg>`;return;
   }
-  if(!state.chart)state.chart=echarts.init(target);
+  if(!state.chart){target.innerHTML='';state.chart=echarts.init(target);}
   const gradTop = rising
     ? (dark ? 'rgba(88,227,251,.22)' : 'rgba(27,127,179,.18)')
     : (dark ? 'rgba(242,123,137,.20)' : 'rgba(201,64,82,.15)');
@@ -1599,7 +1599,7 @@ async function loadRange(span, silent=false){
   finally{if(state.historyRange===span && state.dashboardMode===mode)$('history-loading').classList.add('hidden');}
 }
 
-function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false){
+function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false, skipAutoHistory=false){
   const prevBase = state.dashboard?.base_currency;
   const baseChanged = !!(prevBase && prevBase !== d.base_currency);
   const nextRevs = d.history_revisions || { investments: d.history_revision || null, cash: null, nav: null };
@@ -1615,7 +1615,7 @@ function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false){
   if(baseChanged) inFlightHistory.clear();
   state.dashboard = d;
   renderDashboard();
-  renderAnalytics();
+  if(state.view === 'analytics') renderAnalytics();
   renderAccount();
   const activeMode = state.dashboardMode;
   if(preloadedHistory){
@@ -1633,6 +1633,7 @@ function applyDashboardData(d, preloadedHistory=null, historyUnchanged=false){
     if(state.view === 'home') renderChart(state.history[activeMode][state.historyRange]);
     return;
   }
+  if(skipAutoHistory) return;
   if(state.view === 'home') loadRange(state.historyRange, hadChart && !baseChanged);
 }
 
@@ -2197,6 +2198,7 @@ function bindEvents(){
   $('logout-btn').addEventListener('click',async()=>{
     try{
       await api('/api/logout',{method:'POST'});
+      localStorage.removeItem('track-authed');
       state.user=null;state.dashboard=null;state.trades=[];state.cashTxns=[];
       clearHistoryCache();showAuth();toast('Signed out');
     }catch(e){toast(e.message,true);}
@@ -2209,34 +2211,72 @@ function bindEvents(){
   });
 }
 
-async function startLoggedIn(prefetchedAccount=null){
-  const account = prefetchedAccount || await api('/api/me');
+window.__onEchartsReady = () => {
+  if(!state.dashboard) return;
+  if(state.view === 'home' && !state.chart && currentHistorySeries()){
+    renderChart(currentHistorySeries());
+  } else if(state.view === 'analytics'){
+    renderAnalytics();
+  }
+};
+
+async function startLoggedIn(prefetchedAccount=null, prefetchedHistReq=null){
+  const account = prefetchedAccount || await api('/api/me?include_dashboard=true');
   state.user=account;
-  if(!state.user.authenticated){showAuth();return;}
+  if(!state.user.authenticated){localStorage.removeItem('track-authed');showAuth();return;}
+  localStorage.setItem('track-authed','1');
   renderAccount();showApp();nav('home');
-  $('history-loading').classList.remove('hidden');
-  const dashReq = api('/api/dashboard');
-  const histReq = fetchHistorySpan(state.historyRange, state.dashboardMode).catch(err=>{
+  const mode = state.dashboardMode;
+  const span = state.historyRange;
+  const cachedChart = currentHistorySeries(mode, span);
+  if(!cachedChart) $('history-loading').classList.remove('hidden');
+  const histReq = prefetchedHistReq || (cachedChart ? Promise.resolve(cachedChart) : fetchHistorySpan(span, mode).catch(err=>{
     toast('Development history: '+err.message,true);
     return null;
-  });
+  }));
+  // Render portfolio & cash balances immediately without waiting for the history chart.
   try{
-    const [d, h] = await Promise.all([dashReq, histReq]);
-    applyDashboardData(d, h || null, false);
+    const d = account.dashboard || await api('/api/dashboard');
+    applyDashboardData(d, currentHistorySeries(mode, span), false, true);
   }catch(error){
     toast(error.message,true);
+  }
+  try{
+    const h = await histReq;
+    if(state.historyRange === span && state.dashboardMode === mode){
+      const expectedRev = state.historyRevisions[mode];
+      if(h && (!expectedRev || !h.history_revision || h.history_revision === expectedRev)){
+        if(!state.history[mode]) state.history[mode] = {};
+        state.history[mode][span] = h;
+        renderChart(h);
+      } else if(state.dashboard && !currentHistorySeries(mode, span)){
+        await loadRange(span);
+      }
+    }
   }finally{
-    $('history-loading').classList.add('hidden');
+    if(state.historyRange === span && state.dashboardMode === mode){
+      $('history-loading').classList.add('hidden');
+    }
   }
 }
 
 async function init(){
   bindEvents();applyTheme(state.theme);toggleHidden(state.hidden);
   try{
-    const account=await api('/api/me');
+    const wasAuthed = localStorage.getItem('track-authed') === '1';
+    const meReq = api('/api/me?include_dashboard=true');
+    const earlyHistReq = wasAuthed
+      ? fetchHistorySpan(state.historyRange, state.dashboardMode).catch(()=>null)
+      : null;
+    const account = await meReq;
     $('google-container').classList.toggle('hidden',!account.google_enabled);
     $('google-hint').classList.toggle('hidden',!!account.google_enabled);
-    if(account.authenticated){await startLoggedIn(account);}else showAuth();
+    if(account.authenticated){
+      await startLoggedIn(account, earlyHistReq);
+    }else{
+      localStorage.removeItem('track-authed');
+      showAuth();
+    }
   }catch(error){showAuth();toast(error.message,true);}
 }
 init();

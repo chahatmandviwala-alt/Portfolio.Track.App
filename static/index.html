@@ -96,8 +96,9 @@
       sync();
     });
   </script>
-  <script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-  <script defer src="/static/app.js?v=34"></script>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <script defer src="/static/app.js?v=35"></script>
+  <script async src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js" onload="window.__onEchartsReady&&window.__onEchartsReady()"></script>
 </head>
 <body>
   <div class="ambient ambient-left"></div><div class="ambient ambient-right"></div>

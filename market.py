@@ -24,7 +24,7 @@ import logging
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, time as daytime
@@ -58,26 +58,39 @@ class _CacheRecord:
     end: date
     fetched: datetime
     values: dict
+    _ord_cache: tuple[np.ndarray, np.ndarray] | None = None
 
+_EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
+_DAY_NS = 86_400_000_000_000
 _cache_lock = threading.RLock()
 _local_rows: OrderedDict[str, tuple[float, _CacheRecord | None]] = OrderedDict()
 _quote_rows: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _chart_rows: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
+_fifo_bundle_cache: OrderedDict[str, object] = OrderedDict()
+_cash_bundle_cache: OrderedDict[str, object] = OrderedDict()
 _nse_block_until = 0.0
 _nse_eod_block_until = 0.0
 _nse_eod_missing_dates: dict[str, float] = {}
 _yahoo_crumb_lock = threading.Lock()
 _yahoo_crumb_state: tuple[float, str, dict] | None = None
 _yahoo_crumb_block_until = 0.0
+_prefer_query1_until = 0.0
 _http_local = threading.local()
-# Separate I/O worker pool and coordination pool so parent tasks never deadlock waiting on child I/O.
+# Separate pools so live quotes and FX never queue behind bulk Yahoo chart fetches or warm-ups.
 _io_pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix='market-io')
+_fx_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='market-fx')
+_quote_pool = ThreadPoolExecutor(max_workers=min(16, _MAX_WORKERS), thread_name_prefix='market-quote')
+_bg_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='market-bg')
+_bg_io_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix='market-bg-io')
 _coord_pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix='market-coord')
 _pending_io: dict[tuple, Future] = {}
 _pending_charts: dict[tuple, Future] = {}
+_warmed_keys: OrderedDict[tuple, float] = OrderedDict()
 
 
-def _submit_io(key, function, *args):
+def _submit_io(key, function, *args, pool: ThreadPoolExecutor | None = None):
+    target_pool = pool or _io_pool
+
     def forget(future):
         with _cache_lock:
             if _pending_io.get(key) is future:
@@ -86,7 +99,7 @@ def _submit_io(key, function, *args):
     with _cache_lock:
         future = _pending_io.get(key)
         if future is None:
-            future = _io_pool.submit(function, *args)
+            future = target_pool.submit(function, *args)
             _pending_io[key] = future
             future.add_done_callback(forget)
         return future
@@ -102,6 +115,18 @@ def _http() -> requests.Session:
         session.mount('https://', adapter)
         _http_local.session = session
     return session
+
+
+def _negative_cache_ttl(key: str, today: date) -> float:
+    if key.startswith('nse:close:') and len(key) == 18:
+        try:
+            d = date(int(key[10:14]), int(key[14:16]), int(key[16:18]))
+            if d < today - timedelta(days=2):
+                return 3600.0
+            return 180.0
+        except ValueError:
+            pass
+    return 60.0
 
 
 def _read_cached(keys: list[str]) -> dict[str, _CacheRecord]:
@@ -135,10 +160,12 @@ def _read_cached(keys: list[str]) -> dict[str, _CacheRecord]:
                     found[item.cache_key] = record
                 except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
                     continue
+        today = date.today()
         with _cache_lock:
             for key in missing:
                 item = found.get(key)
-                _local_rows[key] = (now + (900 if item is not None else 30), item)
+                ttl = 3600.0 if item is not None else _negative_cache_ttl(key, today)
+                _local_rows[key] = (now + ttl, item)
                 _local_rows.move_to_end(key)
             while len(_local_rows) > 450:
                 _local_rows.popitem(last=False)
@@ -176,10 +203,52 @@ def _write_cached(rows: dict[str, _CacheRecord]) -> None:
     with _cache_lock:
         now = time.monotonic()
         for key, item in rows.items():
-            _local_rows[key] = (now + 900, item)
+            _local_rows[key] = (now + 3600.0, item)
             _local_rows.move_to_end(key)
         while len(_local_rows) > 450:
             _local_rows.popitem(last=False)
+
+
+def _record_ord_arrays(record: _CacheRecord | None) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted (ordinal_days, float_values) arrays cached on _CacheRecord."""
+    if record is None or not record.values:
+        return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float64)
+    cached = record._ord_cache
+    if cached is not None:
+        return cached
+    items = sorted(record.values.items())
+    ords = np.fromiter((date.fromisoformat(k).toordinal() for k, _ in items), dtype=np.int32, count=len(items))
+    vals = np.fromiter((float(v) for _, v in items), dtype=np.float64, count=len(items))
+    pair = (ords, vals)
+    record._ord_cache = pair
+    return pair
+
+
+def _align_ord_series(ords: np.ndarray, vals: np.ndarray, target_ords: np.ndarray,
+                      bfill: bool = False,
+                      override: tuple[int, float] | None = None) -> np.ndarray:
+    """Fast O(N log K) equivalent of `_daily_frame(...).reindex(days)` (+ optional `.bfill()`)."""
+    n = len(target_ords)
+    if override is not None:
+        ov_ord, ov_val = override
+        if len(ords) == 0:
+            ords = np.array([ov_ord], dtype=np.int32)
+            vals = np.array([ov_val], dtype=np.float64)
+        else:
+            ins = int(np.searchsorted(ords, ov_ord))
+            if ins < len(ords) and int(ords[ins]) == ov_ord:
+                vals = vals.copy()
+                vals[ins] = ov_val
+            else:
+                ords = np.insert(ords, ins, ov_ord)
+                vals = np.insert(vals, ins, ov_val)
+    if len(ords) == 0:
+        return np.full(n, np.nan, dtype=np.float64)
+    pos = np.searchsorted(ords, target_ords, side='right') - 1
+    out = np.where(pos >= 0, vals[np.maximum(pos, 0)], np.nan)
+    if bfill and pos[0] < 0 and int(ords[0]) <= int(target_ords[-1]):
+        out[pos < 0] = vals[0]
+    return out
 
 
 def _get_cached(key: str, start: date, end: date, ttl_hours: float = 18) -> dict | None:
@@ -239,10 +308,24 @@ def _merge_cache(entry: _CacheRecord | None, windows: list[tuple[date, date]],
     return _CacheRecord(min(starts), max(ends), stamp, values)
 
 
+def _yahoo_hosts() -> tuple[str, str]:
+    if time.monotonic() < _prefer_query1_until:
+        return ('query1.finance.yahoo.com', 'query2.finance.yahoo.com')
+    return ('query2.finance.yahoo.com', 'query1.finance.yahoo.com')
+
+
+def _note_yahoo_host_fail(host: str) -> None:
+    global _prefer_query1_until
+    if host.startswith('query2.'):
+        _prefer_query1_until = time.monotonic() + 120.0
+    else:
+        _prefer_query1_until = 0.0
+
+
 def _yahoo_chart(ticker: str, params: dict, timeout: tuple[float, float] = (1.6, 3.2)) -> dict:
     """Try public Yahoo chart hosts with bounded timeouts and fast failure on 4xx."""
     last_error = None
-    for host in ('query2.finance.yahoo.com', 'query1.finance.yahoo.com'):
+    for host in _yahoo_hosts():
         try:
             url = f'https://{host}/v8/finance/chart/{requests.utils.quote(ticker, safe="")}'
             response = _http().get(url, params=params, timeout=timeout)
@@ -258,7 +341,10 @@ def _yahoo_chart(ticker: str, params: dict, timeout: tuple[float, float] = (1.6,
                 return results[0]
             last_error = ValueError('No chart data returned')
             break
-        except (requests.RequestException, ValueError, KeyError) as exc:
+        except requests.RequestException as exc:
+            last_error = exc
+            _note_yahoo_host_fail(host)
+        except (ValueError, KeyError) as exc:
             last_error = exc
             msg = str(exc).lower()
             if 'rate limited' in msg or 'not found' in msg:
@@ -283,21 +369,32 @@ def _get_yahoo_crumb() -> tuple[str, dict] | None:
             return _yahoo_crumb_state[1], _yahoo_crumb_state[2]
         if now < _yahoo_crumb_block_until:
             return None
+        hard_block = False
         try:
             sess = requests.Session()
             sess.headers.update({'User-Agent': _BROWSER_UA, 'Accept': '*/*'})
             # fc.yahoo.com returns 404 while setting the required A3 cookie.
             sess.get('https://fc.yahoo.com', timeout=(1.2, 2.0), allow_redirects=True)
-            resp = sess.get('https://query2.finance.yahoo.com/v1/test/getcrumb', timeout=(1.2, 2.0))
-            if resp.status_code == 200:
-                crumb = (resp.text or '').strip()
-                if crumb and len(crumb) < 64 and '<' not in crumb:
-                    cookies = sess.cookies.get_dict()
-                    _yahoo_crumb_state = (time.monotonic() + 3600, crumb, cookies)
-                    return crumb, cookies
+            for host in _yahoo_hosts():
+                try:
+                    resp = sess.get(f'https://{host}/v1/test/getcrumb', timeout=(1.2, 2.0))
+                except requests.RequestException:
+                    _note_yahoo_host_fail(host)
+                    continue
+                if resp.status_code == 200:
+                    crumb = (resp.text or '').strip()
+                    if crumb and len(crumb) < 64 and '<' not in crumb:
+                        cookies = sess.cookies.get_dict()
+                        _yahoo_crumb_state = (time.monotonic() + 3600, crumb, cookies)
+                        return crumb, cookies
+                if resp.status_code in (401, 403):
+                    hard_block = True
+                    break
+                if resp.status_code == 429:
+                    break
         except requests.RequestException:
             pass
-        _yahoo_crumb_block_until = time.monotonic() + 600
+        _yahoo_crumb_block_until = time.monotonic() + (600.0 if hard_block else 15.0)
         return None
 
 
@@ -309,7 +406,7 @@ def _invalidate_yahoo_crumb(cooldown: float = 600.0) -> None:
 
 
 def _fetch_yahoo_batch(tickers: list[str]) -> dict[str, dict]:
-    """Fetch up to ~45 quotes per single HTTP request via Yahoo v7 quote endpoint.
+    """Fetch up to ~100 quotes per single HTTP request via Yahoo v7 quote endpoint.
 
     Returns only verified positive quotes; any missed tickers seamlessly fall back
     to the concurrent /v8/finance/chart/ path.
@@ -323,29 +420,39 @@ def _fetch_yahoo_batch(tickers: list[str]) -> dict[str, dict]:
     canonical = {t.upper(): t for t in tickers}
     results: dict[str, dict] = {}
     headers = {'User-Agent': _BROWSER_UA, 'Accept': 'application/json'}
-    chunk_size = 45
+    chunk_size = 100
     chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
 
     def fetch_chunk(batch: list[str]) -> dict[str, dict]:
         out: dict[str, dict] = {}
-        try:
-            resp = _http().get(
-                'https://query2.finance.yahoo.com/v7/finance/quote',
-                params={
-                    'symbols': ','.join(batch),
-                    'crumb': crumb,
-                    'fields': 'symbol,regularMarketPrice,regularMarketTime,currency',
-                },
-                headers=headers,
-                cookies=cookies,
-                timeout=(1.4, 2.6),
-            )
+        params = {
+            'symbols': ','.join(batch),
+            'crumb': crumb,
+            'fields': 'symbol,regularMarketPrice,regularMarketTime,currency',
+        }
+        for host in _yahoo_hosts():
+            try:
+                resp = _http().get(
+                    f'https://{host}/v7/finance/quote',
+                    params=params,
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=(1.2, 2.5),
+                )
+            except requests.RequestException:
+                _note_yahoo_host_fail(host)
+                continue
             if resp.status_code in (401, 403):
                 _invalidate_yahoo_crumb(600.0)
                 return {}
-            if resp.status_code != 200:
+            if resp.status_code == 429:
                 return {}
-            items = ((resp.json().get('quoteResponse') or {}).get('result')) or []
+            if resp.status_code != 200:
+                continue
+            try:
+                items = ((resp.json().get('quoteResponse') or {}).get('result')) or []
+            except (ValueError, KeyError, TypeError):
+                return {}
             for item in items:
                 sym = str(item.get('symbol') or '').strip().upper()
                 ticker = canonical.get(sym)
@@ -368,14 +475,13 @@ def _fetch_yahoo_batch(tickers: list[str]) -> dict[str, dict]:
                     'source': 'Yahoo Finance intraday' + (' (not NSE official close)' if ticker.upper().endswith('.NS') else ''),
                     'as_of': as_of,
                 }
-        except (requests.RequestException, ValueError, KeyError, TypeError):
-            return {}
+            return out
         return out
 
     if len(chunks) == 1:
         results.update(fetch_chunk(chunks[0]))
     else:
-        futs = [_io_pool.submit(fetch_chunk, c) for c in chunks]
+        futs = [_quote_pool.submit(fetch_chunk, c) for c in chunks]
         for fut in as_completed(futs):
             try:
                 results.update(fut.result())
@@ -742,7 +848,7 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
                 indian = [t for t in indian if t not in quotes]
             elif time.monotonic() >= _nse_eod_block_until:
                 # Race NSE EOD in the background alongside Yahoo instead of blocking .NS symbols.
-                report = _submit_io(('nse-report', datetime.now(_IST).date()), _load_latest_nse_eod)
+                report = _submit_io(('nse-report', datetime.now(_IST).date()), _load_latest_nse_eod, pool=_quote_pool)
 
         to_fetch = [t for t in missing if t not in quotes]
         if to_fetch and not _PREFER_NSE:
@@ -751,7 +857,7 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
             to_fetch = [t for t in to_fetch if t not in quotes]
 
         if to_fetch:
-            futures = {_submit_io(('quote', mode, t), fetch, t): t for t in to_fetch}
+            futures = {_submit_io(('quote', mode, t), fetch, t, pool=_quote_pool): t for t in to_fetch}
             for future in as_completed(futures):
                 ticker = futures[future]
                 try:
@@ -783,11 +889,38 @@ def get_latest_prices(tickers: list[str]) -> tuple[dict, dict]:
     return quotes, errors
 
 
+def warm_quote_providers(has_nse: bool = True) -> None:
+    """Non-blocking warm-up of Yahoo v7 crumb and (when EOD) NSE bhavcopy before user refreshes."""
+    def _run():
+        try:
+            _get_yahoo_crumb()
+        except Exception:
+            pass
+        if has_nse and _NSE_OFFICIAL_CLOSE and not _nse_trading_window():
+            try:
+                day, closes = _cached_nse_eod()
+                if not day and time.monotonic() >= _nse_eod_block_until:
+                    _submit_io(('nse-report', datetime.now(_IST).date()), _load_latest_nse_eod, pool=_quote_pool)
+            except Exception:
+                pass
+
+    now = time.monotonic()
+    warm_key = ('quote-warm', bool(has_nse), 'live' if _nse_trading_window() else 'eod')
+    with _cache_lock:
+        if _warmed_keys.get(warm_key, 0.0) > now:
+            return
+        _warmed_keys[warm_key] = now + 300.0
+        _warmed_keys.move_to_end(warm_key)
+        while len(_warmed_keys) > 64:
+            _warmed_keys.popitem(last=False)
+    _bg_pool.submit(_run)
+
+
 def _fetch_chart(ticker: str, start: date, end: date) -> dict:
     start_epoch = int(pd.Timestamp(start, tz='UTC').timestamp())
     end_epoch = int((pd.Timestamp(end, tz='UTC') + pd.Timedelta(days=2)).timestamp())
     info = _yahoo_chart(ticker, {'period1': start_epoch, 'period2': end_epoch,
-                                 'interval': '1d', 'events': 'history'},
+                                 'interval': '1d', 'includeAdjustedClose': 'false'},
                         timeout=(1.8, 4.0))
     ts = info.get('timestamp') or []
     closes = (info.get('indicators', {}).get('quote') or [{}])[0].get('close') or []
@@ -803,30 +936,60 @@ def _fetch_chart(ticker: str, start: date, end: date) -> dict:
     return output
 
 
-def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool,
-                       refresh_hours: float, provider) -> tuple[dict, dict]:
-    """Generic batch fetch for prices and FX. Fetch only uncovered/recent windows."""
-    result, errors = {}, {}
+def _series_records_with_windows(
+    keys: dict[str, str],
+    bounds: dict[str, tuple[date, date, date | None]],
+    force: bool,
+    refresh_hours: float,
+    provider,
+    *,
+    pool: ThreadPoolExecutor | None = None,
+) -> tuple[dict[str, _CacheRecord], dict[str, str]]:
+    """Batch fetch per-symbol date windows using cache records directly (zero dict copying).
+
+    `bounds[symbol] = (req_start, req_end, expand_start)`:
+      - `req_start..req_end` is checked against cached coverage.
+      - When a pre-window fetch is needed and `expand_start < req_start`, the fetch extends
+        back to `expand_start` so subsequent wider spans avoid re-fetching the same symbol.
+    """
+    result: dict[str, _CacheRecord] = {}
+    errors: dict[str, str] = {}
+    if not keys:
+        return result, errors
     lookup = _read_cached(list(keys.values()))
     jobs: dict = {}
     for symbol, key in keys.items():
+        req_start, req_end, expand_start = bounds[symbol]
         item = lookup.get(key)
-        windows = _fetch_windows(item, start, end, refresh_hours, force)
+        windows = _fetch_windows(item, req_start, req_end, refresh_hours, force)
+        if windows and expand_start is not None and expand_start < req_start:
+            if item is None:
+                windows = [(expand_start, req_end)]
+            elif not force:
+                expanded = []
+                for a, b in windows:
+                    if a == req_start and req_start < item.start:
+                        expanded.append((expand_start, b))
+                    else:
+                        expanded.append((a, b))
+                windows = expanded
         if item is not None:
             if item.values:
-                result[symbol] = dict(item.values)
+                result[symbol] = item
             else:
                 errors[symbol] = 'No historical data available (cached provider failure)'
         if windows:
-            jobs[symbol] = (key, item, windows)
+            jobs[symbol] = (key, item, windows, req_start, req_end)
         elif item is None:
-            jobs[symbol] = (key, None, [(start, end)])
+            fetch_start = expand_start if (expand_start is not None and expand_start < req_start) else req_start
+            jobs[symbol] = (key, None, [(fetch_start, req_end)], req_start, req_end)
+
     if jobs:
         begin = time.perf_counter()
         future_map = {}
-        for symbol, (key, _, windows) in jobs.items():
+        for symbol, (key, _, windows, _, _) in jobs.items():
             for a, b in windows:
-                fut = _submit_io(('series', key, a, b), provider, symbol, a, b)
+                fut = _submit_io(('series', key, a, b), provider, symbol, a, b, pool=pool)
                 future_map[fut] = (symbol, a, b)
         completed: dict[str, list] = {x: [] for x in jobs}
         failed: dict[str, bool] = {x: False for x in jobs}
@@ -836,28 +999,50 @@ def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool
                 chunk = fut.result()
                 if not isinstance(chunk, dict):
                     raise TypeError('provider did not return a dictionary')
-                if not chunk and jobs[symbol][1] is not None and jobs[symbol][1].values and len(pd.bdate_range(a, b)) > 0:
+                entry = jobs[symbol][1]
+                is_contiguous_pre_window = entry is not None and b == entry.start - timedelta(days=1)
+                if not chunk and entry is not None and entry.values and not is_contiguous_pre_window and len(pd.bdate_range(a, b)) > 0:
                     raise ValueError('No refreshed business-day data; retaining prior prices')
                 completed[symbol].append(((a, b), chunk))
             except Exception as exc:
                 failed[symbol] = True
                 errors[symbol] = f'Market data unavailable ({type(exc).__name__})'
-        to_save = {}
+        to_save: dict[str, _CacheRecord] = {}
+        ram_only: dict[str, _CacheRecord] = {}
         stamp = datetime.now(timezone.utc)
-        for symbol, (key, entry, windows) in jobs.items():
+        for symbol, (key, entry, windows, req_start, req_end) in jobs.items():
             parts = completed[symbol]
             if failed[symbol] or len(parts) != len(windows):
                 if entry is None:
-                    to_save[key] = _CacheRecord(start, end, stamp, {})
+                    to_save[key] = _CacheRecord(req_start, req_end, stamp, {})
                 continue
             parts.sort(key=lambda part: part[0][0])
             updated = _merge_cache(entry, [p[0] for p in parts], [p[1] for p in parts], stamp)
-            to_save[key] = updated
+            # Skip redundant DB rewrite when force-refresh returned identical data within the hour.
+            if (
+                entry is not None
+                and updated.start == entry.start
+                and updated.end == entry.end
+                and updated.values == entry.values
+                and (stamp - entry.fetched).total_seconds() < 3600
+            ):
+                updated._ord_cache = entry._ord_cache
+                ram_only[key] = updated
+            else:
+                if entry is not None and updated.values == entry.values:
+                    updated._ord_cache = entry._ord_cache
+                to_save[key] = updated
             if updated.values:
-                result[symbol] = dict(updated.values)
+                result[symbol] = updated
                 errors.pop(symbol, None)
             else:
                 errors[symbol] = 'No historical quotes available'
+        if ram_only:
+            with _cache_lock:
+                now_m = time.monotonic()
+                for key, item in ram_only.items():
+                    _local_rows[key] = (now_m + 3600.0, item)
+                    _local_rows.move_to_end(key)
         try:
             _write_cached(to_save)
         except Exception:
@@ -867,10 +1052,19 @@ def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool
     return result, errors
 
 
+def _series_with_cache(keys: dict[str, str], start: date, end: date, force: bool,
+                       refresh_hours: float, provider,
+                       *, pool: ThreadPoolExecutor | None = None) -> tuple[dict, dict]:
+    """Generic batch fetch for prices and FX. Fetch only uncovered/recent windows."""
+    bounds = {sym: (start, end, None) for sym in keys}
+    records, errors = _series_records_with_windows(keys, bounds, force, refresh_hours, provider, pool=pool)
+    return {sym: dict(rec.values) for sym, rec in records.items()}, errors
+
+
 def get_prices(tickers: list[str], start: date, end: date, force: bool = False) -> tuple[dict, dict]:
     names = list(dict.fromkeys(x for x in tickers if x))
     return _series_with_cache({t: 'price:' + t for t in names}, start, end,
-                              force, _HIST_REFRESH_HOURS, _fetch_chart)
+                              force, _HIST_REFRESH_HOURS, _fetch_chart, pool=_io_pool)
 
 
 def _fetch_fx_series(ccy: str, base: str, start: date, end: date) -> dict:
@@ -889,13 +1083,30 @@ def _fetch_fx_series(ccy: str, base: str, start: date, end: date) -> dict:
     return {day: float(values[dest])*factor for day, values in raw.items() if dest in values}
 
 
+def _get_fx_records(
+    currencies: list[str],
+    base: str,
+    start: date,
+    end: date,
+    force: bool = False,
+    expand_start: date | None = None,
+    pool: ThreadPoolExecutor | None = None,
+) -> tuple[dict[str, _CacheRecord], dict[str, str]]:
+    names = list(dict.fromkeys(currencies))
+    keys = {ccy: f'fx:{ccy}:{base}' for ccy in names if ccy != base}
+    bounds = {ccy: (start, end, expand_start) for ccy in keys}
+    return _series_records_with_windows(
+        keys, bounds, force, _FX_REFRESH_HOURS,
+        lambda ccy, a, b: _fetch_fx_series(ccy, base, a, b),
+        pool=pool or _fx_pool,
+    )
+
+
 def get_fx_series(currencies: list[str], base: str, start: date, end: date,
                   force=False) -> tuple[dict, dict]:
     names = list(dict.fromkeys(currencies))
-    keys = {ccy: f'fx:{ccy}:{base}' for ccy in names if ccy != base}
-    output, errors = _series_with_cache(
-        keys, start, end, force, _FX_REFRESH_HOURS,
-        lambda ccy, a, b: _fetch_fx_series(ccy, base, a, b))
+    records, errors = _get_fx_records(names, base, start, end, force=force)
+    output = {ccy: dict(rec.values) for ccy, rec in records.items()}
     if base in names:
         output[base] = {start.isoformat(): 1.0}
     return output, errors
@@ -903,19 +1114,34 @@ def get_fx_series(currencies: list[str], base: str, start: date, end: date,
 
 def spot_rates(currencies: list[str], base: str, force: bool = False) -> tuple[dict[str, float], list[str]]:
     today = date.today()
-    series, _ = get_fx_series(currencies, base, today-timedelta(days=8), today, force=force)
+    today_iso = today.isoformat()
+    records, _ = _get_fx_records(currencies, base, today - timedelta(days=8), today, force=force)
     rates, warnings = {}, []
     for ccy in currencies:
         if ccy == base:
             rates[ccy] = 1.0
-        elif series.get(ccy):
-            dates = [d for d in series[ccy] if d <= today.isoformat()]
-            if dates:
-                rates[ccy] = series[ccy][max(dates)]
+        else:
+            rec = records.get(ccy)
+            if rec and rec.values:
+                # Fast path using pre-sorted ordinal array if available, else single max scan.
+                if rec._ord_cache is not None:
+                    ords, vals = rec._ord_cache
+                    idx_r = int(np.searchsorted(ords, today.toordinal(), side='right')) - 1
+                    if idx_r >= 0:
+                        rates[ccy] = float(vals[idx_r])
+                    else:
+                        warnings.append(f'Latest FX unavailable: {ccy} → {base} (not converted).')
+                else:
+                    best_day = None
+                    for d in rec.values:
+                        if d <= today_iso and (best_day is None or d > best_day):
+                            best_day = d
+                    if best_day is not None:
+                        rates[ccy] = rec.values[best_day]
+                    else:
+                        warnings.append(f'Latest FX unavailable: {ccy} → {base} (not converted).')
             else:
                 warnings.append(f'Latest FX unavailable: {ccy} → {base} (not converted).')
-        else:
-            warnings.append(f'Latest FX unavailable: {ccy} → {base} (not converted).')
     return rates, warnings
 
 
@@ -982,9 +1208,48 @@ _HISTORY_COLUMNS = ['trade_date', 'asset', 'side', 'quantity', 'ticker', 'trade_
 _CASH_HISTORY_COLUMNS = ['date', 'foreign_ccy', 'txn_type', 'foreign_amount', 'fx_rate', 'fee_foreign']
 
 
+def compute_inv_hash_bytes(df: pd.DataFrame | None) -> tuple[bytes, bool]:
+    """Compute reusable hash bytes for trades history columns and whether any .NS ticker exists."""
+    if df is None or df.empty:
+        return b'', False
+    raw = pd.util.hash_pandas_object(df[_HISTORY_COLUMNS], index=False).values.tobytes()
+    has_nse = any(str(t).upper().endswith('.NS') for t in df['ticker'].tolist() if t)
+    return raw, has_nse
+
+
+def compute_cash_hash_bytes(cash_df: pd.DataFrame | None) -> bytes:
+    """Compute reusable hash bytes for cash history columns."""
+    if cash_df is None or cash_df.empty:
+        return b''
+    return pd.util.hash_pandas_object(cash_df[_CASH_HISTORY_COLUMNS], index=False).values.tobytes()
+
+
+def nse_revision_token() -> bytes:
+    """Lookup cached official NSE close stamp once for chart revision hashing."""
+    if not _NSE_OFFICIAL_CLOSE:
+        return b''
+    days = [d for d in _nse_report_dates() if d <= date.today()]
+    keys = ['nse:close:' + d.strftime('%Y%m%d') for d in days]
+    try:
+        cached = _read_cached(keys)
+    except Exception:
+        _LOG.exception('Could not read NSE close metadata for chart revision')
+        return b'close-metadata-unavailable'
+    for key in keys:
+        record = cached.get(key)
+        if record and record.values:
+            return (key + record.fetched.isoformat()).encode()
+    return b''
+
+
 def history_revision(df: pd.DataFrame, base: str,
                      cash_df: pd.DataFrame | None = None,
-                     mode: str = 'investments') -> str:
+                     mode: str = 'investments',
+                     *,
+                     inv_hash_bytes: bytes | None = None,
+                     cash_hash_bytes: bytes | None = None,
+                     has_nse: bool | None = None,
+                     nse_token: bytes | None = None) -> str:
     """Identify exactly the ledger and official-close inputs used by the daily chart."""
     if mode not in ('investments', 'cash', 'nav'):
         mode = 'investments'
@@ -994,24 +1259,23 @@ def history_revision(df: pd.DataFrame, base: str,
     digest.update(date.today().isoformat().encode())
     if mode in ('investments', 'nav') and df is not None and not df.empty:
         digest.update(b'INV:')
-        digest.update(pd.util.hash_pandas_object(df[_HISTORY_COLUMNS], index=False).values.tobytes())
-        if _NSE_OFFICIAL_CLOSE and df.ticker.str.upper().str.endswith('.NS').any():
-            days = [d for d in _nse_report_dates() if d <= date.today()]
-            keys = ['nse:close:' + d.strftime('%Y%m%d') for d in days]
-            try:
-                cached = _read_cached(keys)
-            except Exception:
-                _LOG.exception('Could not read NSE close metadata for chart revision')
-                digest.update(b'close-metadata-unavailable')
-                cached = {}
-            for key in keys:
-                record = cached.get(key)
-                if record and record.values:
-                    digest.update((key + record.fetched.isoformat()).encode())
-                    break
+        if inv_hash_bytes is None:
+            inv_hash_bytes, auto_has_nse = compute_inv_hash_bytes(df)
+            if has_nse is None:
+                has_nse = auto_has_nse
+        digest.update(inv_hash_bytes)
+        if _NSE_OFFICIAL_CLOSE:
+            if has_nse is None:
+                has_nse = any(str(t).upper().endswith('.NS') for t in df['ticker'].tolist() if t)
+            if has_nse:
+                tok = nse_token if nse_token is not None else nse_revision_token()
+                if tok:
+                    digest.update(tok)
     if mode in ('cash', 'nav') and cash_df is not None and not cash_df.empty:
         digest.update(b'CASH:')
-        digest.update(pd.util.hash_pandas_object(cash_df[_CASH_HISTORY_COLUMNS], index=False).values.tobytes())
+        if cash_hash_bytes is None:
+            cash_hash_bytes = compute_cash_hash_bytes(cash_df)
+        digest.update(cash_hash_bytes)
     return digest.hexdigest()
 
 
@@ -1040,15 +1304,79 @@ def peek_cached_history(span: str, *, revision: str, owner=None, mode: str = 'in
     return None
 
 
+def _store_chart_cache(key: tuple, result: dict) -> None:
+    with _cache_lock:
+        _chart_rows[key] = (time.monotonic() + 600.0, result)
+        _chart_rows.move_to_end(key)
+        while len(_chart_rows) > 72:
+            _chart_rows.popitem(last=False)
+
+
+def _format_history_reply(
+    start_ord: int,
+    n_days: int,
+    span: str,
+    mode: str,
+    rebase: bool,
+    portfolio_daily: np.ndarray,
+    invested_daily: np.ndarray,
+    cum_dev: np.ndarray,
+    all_realized: float,
+    warnings: list[str],
+    estimated_assets: list[str],
+    excluded_assets: list[str],
+    price_count: int,
+) -> dict:
+    baseline = float(cum_dev[0]) if rebase else 0.0
+    dev_series = cum_dev - baseline
+
+    max_points = 920
+    step = max(1, int(np.ceil(n_days / max_points)))
+    take = np.arange(0, n_days, step)
+    if take[-1] != n_days - 1:
+        take = np.r_[take, n_days - 1]
+    points = [
+        {
+            'date': date.fromordinal(start_ord + int(i)).isoformat(),
+            'value': round(float(dev_series[i]), 2),
+            'portfolio_value': round(float(portfolio_daily[i]), 2),
+            'invested': round(float(invested_daily[i]), 2),
+        }
+        for i in take
+    ]
+    return {
+        'points': points,
+        'range': span,
+        'mode': mode,
+        'warnings': warnings,
+        'estimated_assets': estimated_assets,
+        'excluded_assets': excluded_assets,
+        'price_count': price_count,
+        'baseline': round(baseline, 2),
+        'development': round(float(dev_series[-1]), 2),
+        'realized_total': round(all_realized, 2),
+        'source': 'Daily development (Unrealized P/L + Realized P/L) using Yahoo Finance daily closes + Frankfurter FX',
+    }
+
+
 def portfolio_history(df: pd.DataFrame, base: str, span: str, *,
                       revision=None, owner=None,
                       cash_df: pd.DataFrame | None = None,
-                      mode: str = 'investments') -> dict:
+                      mode: str = 'investments',
+                      inv_hash_bytes: bytes | None = None,
+                      cash_hash_bytes: bytes | None = None,
+                      has_nse: bool | None = None,
+                      nse_token: bytes | None = None,
+                      cash_computed: pd.DataFrame | None = None) -> dict:
     if span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
         raise ValueError('Unsupported range')
     if mode not in ('investments', 'cash', 'nav'):
         raise ValueError('Unsupported history mode')
-    rev = revision or history_revision(df, base, cash_df=cash_df, mode=mode)
+    rev = revision or history_revision(
+        df, base, cash_df=cash_df, mode=mode,
+        inv_hash_bytes=inv_hash_bytes, cash_hash_bytes=cash_hash_bytes,
+        has_nse=has_nse, nse_token=nse_token,
+    )
     key = (owner, mode, rev, span)
     with _cache_lock:
         hit = _chart_rows.get(key)
@@ -1062,11 +1390,24 @@ def portfolio_history(df: pd.DataFrame, base: str, span: str, *,
     if not leader:
         return _shallow_chart_copy(pending.result())
     try:
-        result = _calculate_history(df, cash_df, base, span, mode)
-        with _cache_lock:
-            _chart_rows[key] = (time.monotonic() + 600, result)
-            while len(_chart_rows) > 72:
-                _chart_rows.popitem(last=False)
+        sibling_replies: dict[str, dict] = {}
+        result = _calculate_history(
+            df, cash_df, base, span, mode,
+            inv_hash_bytes=inv_hash_bytes,
+            cash_hash_bytes=cash_hash_bytes,
+            cash_computed=cash_computed,
+            sibling_out=sibling_replies if mode == 'nav' else None,
+        )
+        _store_chart_cache(key, result)
+        # In NAV mode, we already computed investment & cash daily series; cache them for instant mode switching.
+        if sibling_replies:
+            for sib_mode, sib_res in sibling_replies.items():
+                sib_rev = history_revision(
+                    df, base, cash_df=cash_df, mode=sib_mode,
+                    inv_hash_bytes=inv_hash_bytes, cash_hash_bytes=cash_hash_bytes,
+                    has_nse=has_nse, nse_token=nse_token,
+                )
+                _store_chart_cache((owner, sib_mode, sib_rev, span), sib_res)
         pending.set_result(result)
         return _shallow_chart_copy(result)
     except BaseException as exc:
@@ -1083,75 +1424,364 @@ def _daily_frame(frame: pd.DataFrame, days: pd.DatetimeIndex) -> pd.DataFrame:
     return frame.reindex(frame.index.union(days)).sort_index().ffill().reindex(days)
 
 
+@dataclass
+class _DailyFifoBundle:
+    u_days_ord: np.ndarray            # sorted unique trade day ordinals, shape (U,)
+    assets: tuple[str, ...]           # asset names in first-appearance order, len A
+    qty_mat: np.ndarray               # forward-filled float64, shape (U, A)
+    cost_mat: np.ndarray              # forward-filled float64, shape (U, A)
+    cum_realized_u: np.ndarray        # cumulative realized P/L at u_days_ord, shape (U,)
+    all_time_realized: float
+    tickers: tuple[str, ...]          # latest non-empty ticker per asset (len A)
+    ccys: tuple[str, ...]             # latest trade_ccy per asset (len A)
+    first_held_ord: tuple[int | None, ...]
+    last_held_ord: tuple[int | None, ...]  # None means still held past last trade date
+    rec_px: tuple[tuple[np.ndarray, np.ndarray], ...]
+    rec_fx: tuple[tuple[np.ndarray, np.ndarray], ...]
+    first_trade_date: date
+
+
+@dataclass
+class _DailyCashBundle:
+    u_days_ord: np.ndarray            # sorted unique cash day ordinals, shape (U,)
+    ccys: tuple[str, ...]             # uppercase currency codes, len C
+    pos_mat: np.ndarray               # forward-filled float64, shape (U, C)
+    cost_mat: np.ndarray              # forward-filled float64, shape (U, C)
+    cum_realized_u: np.ndarray        # cumulative realized P/L at u_days_ord, shape (U,)
+    all_time_realized: float
+    rec_fx: dict[str, tuple[np.ndarray, np.ndarray]]
+    first_cash_date: date
+
+
+def _ffill_2d(mat: np.ndarray) -> np.ndarray:
+    """Vectorized column-wise forward-fill on a 2D float64 array, replacing leading NaNs with 0."""
+    u, a = mat.shape
+    if u == 0 or a == 0:
+        return np.zeros((u, a), dtype=np.float64)
+    mask = np.isnan(mat)
+    idx_ff = np.where(~mask, np.arange(u, dtype=np.int32)[:, None], 0)
+    np.maximum.accumulate(idx_ff, axis=0, out=idx_ff)
+    filled = mat[idx_ff, np.arange(a, dtype=np.int32)[None, :]]
+    np.nan_to_num(filled, copy=False, nan=0.0)
+    return filled
+
+
+def _build_daily_fifo_bundle(df: pd.DataFrame, cache_key: str | None = None) -> _DailyFifoBundle:
+    """Fast NumPy daily FIFO replay matching portfolio.py rules, cached per ledger hash."""
+    if cache_key is not None:
+        with _cache_lock:
+            hit = _fifo_bundle_cache.get(cache_key)
+            if hit is not None:
+                _fifo_bundle_cache.move_to_end(cache_key)
+                return hit
+
+    order, ts_ns, assets_list, is_buy, qtys, ccys_list = portfolio._fifo_order_and_arrays(df)
+    prices_arr = df['price_trade_ccy'].to_numpy(dtype=float)
+    fees_arr = df['charges_trade_ccy'].to_numpy(dtype=float)
+    stt_arr = df['stt_trade_ccy'].to_numpy(dtype=float)
+    fx_arr = df['fx_to_base'].to_numpy(dtype=float)
+    gross = qtys * prices_arr
+    unit_base_arr = (gross + np.where(is_buy, fees_arr + stt_arr, -fees_arr - stt_arr)) * fx_arr / qtys
+    days_ord_arr = (ts_ns // _DAY_NS + _EPOCH_ORDINAL).astype(np.int32)
+
+    u_days_ord, inv_day = np.unique(days_ord_arr, return_inverse=True)
+    n_days = len(u_days_ord)
+    first_trade_date = date.fromordinal(int(u_days_ord[0]))
+
+    asset_to_col: dict[str, int] = {}
+    asset_names: list[str] = []
+    lots_by_col: list[deque] = []
+
+    # First register asset order matching groupby('asset', sort=False) on sorted trades.
+    for idx in order:
+        a = assets_list[idx]
+        if a not in asset_to_col:
+            asset_to_col[a] = len(asset_names)
+            asset_names.append(a)
+            lots_by_col.append(deque())
+
+    n_assets = len(asset_names)
+    qty_mat = np.full((n_days, n_assets), np.nan, dtype=np.float64)
+    cost_mat = np.full((n_days, n_assets), np.nan, dtype=np.float64)
+    realized_by_u = np.zeros(n_days, dtype=np.float64)
+
+    for idx in order:
+        col = asset_to_col[assets_list[idx]]
+        u_i = int(inv_day[idx])
+        n = float(qtys[idx])
+        unit = float(unit_base_arr[idx])
+        lots = lots_by_col[col]
+        if is_buy[idx]:
+            lots.append([n, unit])
+        else:
+            left = n
+            realized_delta = 0.0
+            while left > 1e-9 and lots:
+                lot = lots[0]
+                qty = left if left < lot[0] else lot[0]
+                left -= qty
+                lot[0] -= qty
+                realized_delta += (unit - lot[1]) * qty
+                if lot[0] <= 1e-9:
+                    lots.popleft()
+            if realized_delta:
+                realized_by_u[u_i] += realized_delta
+        qty_mat[u_i, col] = sum(lot[0] for lot in lots)
+        cost_mat[u_i, col] = sum(lot[0] * lot[1] for lot in lots)
+
+    qty_mat = _ffill_2d(qty_mat)
+    cost_mat = _ffill_2d(cost_mat)
+    cum_realized_u = np.cumsum(realized_by_u)
+    all_time_realized = float(cum_realized_u[-1]) if n_days else 0.0
+
+    # Latest ticker & trade_ccy per asset (matching chronological stable sort keep='last').
+    tickers_list = df['ticker'].tolist()
+    latest_ticker = [''] * n_assets
+    latest_ccy = [''] * n_assets
+    # Traverse in chronological order (order is sorted by trade_date, side_rank, orig_row;
+    # for latest trade_ccy / latest non-empty ticker by trade_date stable, sort by ts_ns only).
+    chrono_order = np.argsort(ts_ns, kind='stable')
+    for idx in chrono_order:
+        col = asset_to_col[assets_list[idx]]
+        latest_ccy[col] = str(ccys_list[idx])
+        tk = str(tickers_list[idx]) if tickers_list[idx] is not None else ''
+        if tk:
+            latest_ticker[col] = tk
+
+    # Recorded daily prices & FX per asset in CSV order (drop_duplicates(['day', 'asset'], keep='last')).
+    rec_px_dicts: list[dict[int, float]] = [{} for _ in range(n_assets)]
+    rec_fx_dicts: list[dict[int, float]] = [{} for _ in range(n_assets)]
+    for i in range(len(assets_list)):
+        col = asset_to_col[assets_list[i]]
+        d_ord = int(days_ord_arr[i])
+        rec_px_dicts[col][d_ord] = float(prices_arr[i])
+        rec_fx_dicts[col][d_ord] = float(fx_arr[i])
+
+    rec_px = []
+    rec_fx = []
+    for col in range(n_assets):
+        px_items = sorted(rec_px_dicts[col].items())
+        rec_px.append((
+            np.fromiter((k for k, _ in px_items), dtype=np.int32, count=len(px_items)),
+            np.fromiter((v for _, v in px_items), dtype=np.float64, count=len(px_items)),
+        ))
+        fx_items = sorted(rec_fx_dicts[col].items())
+        rec_fx.append((
+            np.fromiter((k for k, _ in fx_items), dtype=np.int32, count=len(fx_items)),
+            np.fromiter((v for _, v in fx_items), dtype=np.float64, count=len(fx_items)),
+        ))
+
+    # Exact holding window [first_held_ord, last_held_ord] per asset.
+    first_held: list[int | None] = []
+    last_held: list[int | None] = []
+    for col in range(n_assets):
+        pos_idx = np.flatnonzero(qty_mat[:, col] > 1e-9)
+        if len(pos_idx) == 0:
+            first_held.append(None)
+            last_held.append(None)
+        else:
+            first_held.append(int(u_days_ord[int(pos_idx[0])]))
+            if qty_mat[-1, col] > 1e-9:
+                last_held.append(None)
+            else:
+                # First day after last positive day where qty dropped to <= 1e-9.
+                last_pos = int(pos_idx[-1])
+                close_u = min(last_pos + 1, n_days - 1)
+                last_held.append(int(u_days_ord[close_u]))
+
+    bundle = _DailyFifoBundle(
+        u_days_ord=u_days_ord,
+        assets=tuple(asset_names),
+        qty_mat=qty_mat,
+        cost_mat=cost_mat,
+        cum_realized_u=cum_realized_u,
+        all_time_realized=all_time_realized,
+        tickers=tuple(latest_ticker),
+        ccys=tuple(latest_ccy),
+        first_held_ord=tuple(first_held),
+        last_held_ord=tuple(last_held),
+        rec_px=tuple(rec_px),
+        rec_fx=tuple(rec_fx),
+        first_trade_date=first_trade_date,
+    )
+    if cache_key is not None:
+        with _cache_lock:
+            _fifo_bundle_cache[cache_key] = bundle
+            _fifo_bundle_cache.move_to_end(cache_key)
+            while len(_fifo_bundle_cache) > 8:
+                _fifo_bundle_cache.popitem(last=False)
+    return bundle
+
+
+def _build_daily_cash_bundle(
+    cash_df: pd.DataFrame,
+    cache_key: str | None = None,
+    computed: pd.DataFrame | None = None,
+) -> _DailyCashBundle:
+    """Fast NumPy daily cash replay matching ForexTracker average-cost rules, cached per hash."""
+    if cache_key is not None:
+        with _cache_lock:
+            hit = _cash_bundle_cache.get(cache_key)
+            if hit is not None:
+                _cash_bundle_cache.move_to_end(cache_key)
+                return hit
+
+    comp = computed if computed is not None else cash_engine.recompute_average_cost(cash_df)
+    ts_ns = portfolio._trade_date_ns(comp['date'])
+    days_ord_arr = (ts_ns // _DAY_NS + _EPOCH_ORDINAL).astype(np.int32)
+    u_days_ord, inv_day = np.unique(days_ord_arr, return_inverse=True)
+    n_days = len(u_days_ord)
+    first_cash_date = date.fromordinal(int(u_days_ord[0]))
+
+    ccy_list = [str(c).upper() for c in comp['foreign_ccy'].tolist()]
+    r_pos = comp['running_position'].to_numpy(dtype=float)
+    r_cost = comp['running_cost_base'].to_numpy(dtype=float)
+    r_pl = comp['realized_pl_base'].to_numpy(dtype=float)
+
+    ccys_sorted = sorted(set(ccy_list))
+    ccy_to_col = {c: i for i, c in enumerate(ccys_sorted)}
+    n_ccys = len(ccys_sorted)
+
+    pos_mat = np.full((n_days, n_ccys), np.nan, dtype=np.float64)
+    cost_mat = np.full((n_days, n_ccys), np.nan, dtype=np.float64)
+    realized_by_u = np.zeros(n_days, dtype=np.float64)
+
+    for i in range(len(ccy_list)):
+        u_i = int(inv_day[i])
+        col = ccy_to_col[ccy_list[i]]
+        pos_mat[u_i, col] = float(r_pos[i])
+        cost_mat[u_i, col] = float(r_cost[i])
+        realized_by_u[u_i] += float(r_pl[i])
+
+    pos_mat = _ffill_2d(pos_mat)
+    cost_mat = _ffill_2d(cost_mat)
+    cum_realized_u = np.cumsum(realized_by_u)
+    all_time_realized = float(cum_realized_u[-1]) if n_days else 0.0
+
+    # Recorded cash FX in original CSV order (drop_duplicates(['day', 'foreign_ccy'], keep='last')).
+    raw_ts_ns = portfolio._trade_date_ns(cash_df['date'])
+    raw_days = (raw_ts_ns // _DAY_NS + _EPOCH_ORDINAL).astype(np.int32)
+    raw_ccys = [str(c).upper() for c in cash_df['foreign_ccy'].tolist()]
+    raw_fx = cash_df['fx_rate'].to_numpy(dtype=float)
+    rec_fx_dicts: dict[str, dict[int, float]] = {}
+    for i in range(len(raw_ccys)):
+        c = raw_ccys[i]
+        d_map = rec_fx_dicts.get(c)
+        if d_map is None:
+            d_map = {}
+            rec_fx_dicts[c] = d_map
+        d_map[int(raw_days[i])] = float(raw_fx[i])
+    rec_fx: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for c, d_map in rec_fx_dicts.items():
+        items = sorted(d_map.items())
+        rec_fx[c] = (
+            np.fromiter((k for k, _ in items), dtype=np.int32, count=len(items)),
+            np.fromiter((v for _, v in items), dtype=np.float64, count=len(items)),
+        )
+
+    bundle = _DailyCashBundle(
+        u_days_ord=u_days_ord,
+        ccys=tuple(ccys_sorted),
+        pos_mat=pos_mat,
+        cost_mat=cost_mat,
+        cum_realized_u=cum_realized_u,
+        all_time_realized=all_time_realized,
+        rec_fx=rec_fx,
+        first_cash_date=first_cash_date,
+    )
+    if cache_key is not None:
+        with _cache_lock:
+            _cash_bundle_cache[cache_key] = bundle
+            _cash_bundle_cache.move_to_end(cache_key)
+            while len(_cash_bundle_cache) > 8:
+                _cash_bundle_cache.popitem(last=False)
+    return bundle
+
+
 def _daily_fifo_state(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, float]:
     """Replay trades chronologically with exact portfolio.py FIFO rules on unit_base."""
-    dd = portfolio.derived(df)
-    temp = dd.copy()
-    temp['_side_rank'] = np.where(temp.side == 'BUY', 0, 1)
-    temp['_row'] = np.arange(len(temp))
-    temp = temp.sort_values(['trade_date', '_side_rank', '_row'], kind='stable')
-
-    qty_map: dict[str, dict[pd.Timestamp, float]] = {}
-    cost_map: dict[str, dict[pd.Timestamp, float]] = {}
-    realized_by_day: dict[pd.Timestamp, float] = {}
-
-    for asset, g in temp.groupby('asset', sort=False):
-        lots: list[list[float]] = []
-        q_days: dict[pd.Timestamp, float] = {}
-        c_days: dict[pd.Timestamp, float] = {}
-        for row in g.itertuples(index=False):
-            day = row.trade_date.normalize()
-            n = float(row.quantity)
-            unit = float(row.unit_base)
-            if row.side == 'BUY':
-                lots.append([n, unit])
-            else:
-                left = n
-                realized_delta = 0.0
-                while left > 1e-9 and lots:
-                    lot = lots[0]
-                    qty = min(left, lot[0])
-                    left -= qty
-                    lot[0] -= qty
-                    realized_delta += (unit - lot[1]) * qty
-                    if lot[0] <= 1e-9:
-                        lots.pop(0)
-                if realized_delta:
-                    realized_by_day[day] = realized_by_day.get(day, 0.0) + realized_delta
-            rem = sum(lot[0] for lot in lots)
-            cost = sum(lot[0] * lot[1] for lot in lots)
-            q_days[day] = rem
-            c_days[day] = cost
-        qty_map[asset] = q_days
-        cost_map[asset] = c_days
-
-    qty_df = pd.DataFrame(qty_map, dtype='float64').sort_index().ffill().fillna(0.0)
-    cost_df = pd.DataFrame(cost_map, dtype='float64').sort_index().ffill().fillna(0.0)
-    if realized_by_day:
-        r_series = pd.Series(realized_by_day, dtype='float64').sort_index().cumsum()
-        all_time_realized = float(r_series.iloc[-1])
+    bundle = _build_daily_fifo_bundle(df)
+    dt_index = pd.DatetimeIndex([pd.Timestamp(date.fromordinal(int(d))) for d in bundle.u_days_ord])
+    qty_df = pd.DataFrame(bundle.qty_mat, index=dt_index, columns=list(bundle.assets))
+    cost_df = pd.DataFrame(bundle.cost_mat, index=dt_index, columns=list(bundle.assets))
+    if len(bundle.u_days_ord):
+        r_series = pd.Series(bundle.cum_realized_u, index=dt_index, dtype='float64')
     else:
         r_series = pd.Series(dtype='float64')
-        all_time_realized = 0.0
-    return qty_df, cost_df, r_series, all_time_realized
+    return qty_df, cost_df, r_series, bundle.all_time_realized
 
 
 def _daily_cash_state(cash_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, float]:
     """Replay cash_txns with exact ForexTracker average-cost rules."""
-    computed = cash_engine.recompute_average_cost(cash_df)
-    computed = computed.assign(_day=computed['date'].dt.normalize())
-    end_of_day = computed.drop_duplicates(['_day', 'foreign_ccy'], keep='last')
-    pos_df = end_of_day.pivot(index='_day', columns='foreign_ccy', values='running_position').sort_index().ffill().fillna(0.0)
-    cost_df = end_of_day.pivot(index='_day', columns='foreign_ccy', values='running_cost_base').sort_index().ffill().fillna(0.0)
-    realized_daily = computed.groupby('_day')['realized_pl_base'].sum().sort_index().cumsum()
-    all_time_realized = float(realized_daily.iloc[-1]) if not realized_daily.empty else 0.0
-    return pos_df, cost_df, realized_daily, all_time_realized
+    bundle = _build_daily_cash_bundle(cash_df)
+    dt_index = pd.DatetimeIndex([pd.Timestamp(date.fromordinal(int(d))) for d in bundle.u_days_ord])
+    pos_df = pd.DataFrame(bundle.pos_mat, index=dt_index, columns=list(bundle.ccys))
+    cost_df = pd.DataFrame(bundle.cost_mat, index=dt_index, columns=list(bundle.ccys))
+    r_series = pd.Series(bundle.cum_realized_u, index=dt_index, dtype='float64')
+    return pos_df, cost_df, r_series, bundle.all_time_realized
 
 
-def _investments_daily_arrays(df: pd.DataFrame, base: str, idx: pd.DatetimeIndex,
-                              start: date, end: date) -> dict:
-    """Compute daily investment value, invested cost, and cumulative development on idx."""
-    n = len(idx)
+def _latest_nse_overlay(end: date) -> tuple[int, dict[str, float]] | None:
+    """Fast cache-only lookup for the latest applicable NSE official close snapshot."""
+    if not _NSE_OFFICIAL_CLOSE:
+        return None
+    candidate_days = _nse_report_dates()
+    snapshot = _read_cached(['nse:close:' + d.strftime('%Y%m%d') for d in candidate_days])
+    for d in candidate_days:
+        record = snapshot.get('nse:close:' + d.strftime('%Y%m%d'))
+        if record and record.values and d <= end:
+            return d.toordinal(), record.values
+    return None
+
+
+def _compute_inv_ticker_bounds(
+    bundle: _DailyFifoBundle,
+    active_col_indices: np.ndarray,
+    market_start: date,
+    end: date,
+    expand_to_full_held: bool,
+) -> dict[str, tuple[date, date, date | None]]:
+    """Compute minimal per-ticker [req_start, req_end, expand_start] bounds from actual held periods."""
+    ticker_bounds: dict[str, tuple[date, date, date | None]] = {}
+    for col in active_col_indices:
+        tk = bundle.tickers[int(col)]
+        if not tk:
+            continue
+        f_ord = bundle.first_held_ord[int(col)]
+        l_ord = bundle.last_held_ord[int(col)]
+        held_start = date.fromordinal(f_ord) - timedelta(days=21) if f_ord is not None else market_start
+        held_end = min(end, date.fromordinal(l_ord)) if l_ord is not None else end
+        req_start = min(held_end, max(market_start, held_start))
+        req_end = held_end
+        exp_start = held_start if (expand_to_full_held and held_start < req_start) else None
+        prev = ticker_bounds.get(tk)
+        if prev is None:
+            ticker_bounds[tk] = (req_start, req_end, exp_start)
+        else:
+            p_exp = prev[2]
+            if exp_start is not None and p_exp is not None:
+                merged_exp = min(exp_start, p_exp)
+            else:
+                merged_exp = exp_start if exp_start is not None else p_exp
+            ticker_bounds[tk] = (min(prev[0], req_start), max(prev[1], req_end), merged_exp)
+    return ticker_bounds
+
+
+def _investments_daily_arrays(
+    df: pd.DataFrame,
+    base: str,
+    target_ords: np.ndarray,
+    start: date,
+    end: date,
+    *,
+    bundle: _DailyFifoBundle | None = None,
+    expand_to_full_held: bool = False,
+    preloaded_fx: tuple[dict[str, _CacheRecord], dict[str, str]] | None = None,
+    preloaded_prices: tuple[dict[str, _CacheRecord], dict[str, str]] | None = None,
+    fx_expand_start: date | None = None,
+) -> dict:
+    """Compute daily investment value, invested cost, and cumulative development on target_ords."""
+    n = len(target_ords)
     zeros = np.zeros(n, dtype=float)
     if df is None or df.empty:
         return {
@@ -1160,105 +1790,174 @@ def _investments_daily_arrays(df: pd.DataFrame, base: str, idx: pd.DatetimeIndex
             'estimated_assets': [], 'excluded_assets': [], 'price_count': 0,
         }
 
-    qty_all, cost_all, realized_series, all_time_realized = _daily_fifo_state(df)
-    changes = qty_all.reindex(idx, method='ffill').fillna(0.0)
-    costs = cost_all.reindex(idx, method='ffill').fillna(0.0)
-    if not realized_series.empty:
-        cum_realized = realized_series.reindex(idx, method='ffill').fillna(0.0).to_numpy(dtype=float)
-    else:
-        cum_realized = np.zeros(n, dtype=float)
+    if bundle is None:
+        bundle = _build_daily_fifo_bundle(df)
 
-    active_cols = [col for col in changes.columns if changes[col].gt(1e-9).any()]
-    if not active_cols:
+    pos = np.searchsorted(bundle.u_days_ord, target_ords, side='right') - 1
+    valid = pos >= 0
+    safe_pos = np.maximum(pos, 0)
+    changes_all = np.where(valid[:, None], bundle.qty_mat[safe_pos], 0.0)
+    costs_all = np.where(valid[:, None], bundle.cost_mat[safe_pos], 0.0)
+    cum_realized = np.where(valid, bundle.cum_realized_u[safe_pos], 0.0)
+
+    active_idx = np.flatnonzero((changes_all > 1e-9).any(axis=0))
+    if len(active_idx) == 0:
         return {
             'value': zeros, 'invested': zeros, 'cum_dev': cum_realized,
-            'realized_total': all_time_realized, 'warnings': [],
+            'realized_total': bundle.all_time_realized, 'warnings': [],
             'estimated_assets': [], 'excluded_assets': [], 'price_count': 0,
         }
 
-    changes = changes[active_cols]
-    costs = costs[active_cols]
-    assets = active_cols
-    chronological = df[df.asset.isin(assets)].sort_values('trade_date', kind='stable')
-    latest = chronological.drop_duplicates('asset', keep='last').set_index('asset')
-    named = chronological[chronological.ticker.ne('')].drop_duplicates('asset', keep='last')
-    tickers = named.set_index('asset').ticker.reindex(assets).fillna('').tolist()
-    ccys = latest.trade_ccy.reindex(assets).tolist()
+    qty_arr = changes_all[:, active_idx]
+    cost_arr = costs_all[:, active_idx]
+    n_act = len(active_idx)
+    assets = [bundle.assets[int(c)] for c in active_idx]
+    tickers = [bundle.tickers[int(c)] for c in active_idx]
+    ccys = [bundle.ccys[int(c)] for c in active_idx]
+
     market_start = start - timedelta(days=10)
-    price_keys = {'price:' + t for t in tickers if t}
-    fx_keys = {f'fx:{ccy}:{base}' for ccy in ccys if ccy != base}
-    if price_keys or fx_keys:
-        _read_cached(sorted(price_keys | fx_keys))
-    if price_keys and fx_keys:
-        fjob = _coord_pool.submit(get_fx_series, ccys, base, market_start, end)
-        prices, price_errors = get_prices(tickers, market_start, end)
-        fxs, fx_errors = fjob.result()
+    need_prices = preloaded_prices is None
+    need_fx = preloaded_fx is None
+    if need_prices or need_fx:
+        ticker_bounds = _compute_inv_ticker_bounds(bundle, active_idx, market_start, end, expand_to_full_held) if need_prices else {}
+        price_keys = {t: 'price:' + t for t in ticker_bounds}
+        fx_keys_list = [f'fx:{c}:{base}' for c in dict.fromkeys(ccys) if c != base] if need_fx else []
+        preload_keys = list(price_keys.values()) + fx_keys_list
+        if preload_keys:
+            _read_cached(preload_keys)
+        if need_fx and need_prices and price_keys and fx_keys_list:
+            fjob = _coord_pool.submit(_get_fx_records, ccys, base, market_start, end, False, fx_expand_start)
+            price_records, price_errors = _series_records_with_windows(
+                price_keys, ticker_bounds, False, _HIST_REFRESH_HOURS, _fetch_chart, pool=_io_pool
+            )
+            fx_records, fx_errors = fjob.result()
+        else:
+            if need_prices:
+                price_records, price_errors = _series_records_with_windows(
+                    price_keys, ticker_bounds, False, _HIST_REFRESH_HOURS, _fetch_chart, pool=_io_pool
+                )
+            else:
+                price_records, price_errors = preloaded_prices
+            if need_fx:
+                fx_records, fx_errors = _get_fx_records(ccys, base, market_start, end, False, fx_expand_start)
+            else:
+                fx_records, fx_errors = preloaded_fx
     else:
-        prices, price_errors = get_prices(tickers, market_start, end)
-        fxs, fx_errors = get_fx_series(ccys, base, market_start, end)
-    prices = _overlay_official_nse_history(prices, end)
+        price_records, price_errors = preloaded_prices
+        fx_records, fx_errors = preloaded_fx
 
-    sub_df = df[df.asset.isin(assets)]
-    daily_trades = sub_df.assign(day=sub_df.trade_date.dt.normalize())
-    daily_trades = daily_trades.drop_duplicates(['day', 'asset'], keep='last').set_index(['day', 'asset'])
-    recorded_prices = _daily_frame(daily_trades.price_trade_ccy.unstack(), idx).reindex(columns=assets)
-    market_prices = _daily_frame(pd.DataFrame(prices, dtype='float64'), idx).reindex(columns=tickers)
-    market_prices.columns = assets
-    positive = changes.gt(1e-9)
-    estimated = (market_prices.isna() & recorded_prices.notna() & positive).any()
-    prices_used = market_prices.fillna(recorded_prices)
-    unknown = (prices_used.isna() & positive).any()
+    has_ns_price = any(t.upper().endswith('.NS') for t in price_records)
+    nse_overlay = _latest_nse_overlay(end) if has_ns_price else None
 
-    rates = _daily_frame(pd.DataFrame(fxs, dtype='float64'), idx).bfill()
-    rates[base] = 1.0
-    asset_rates = rates.reindex(columns=ccys).copy()
-    asset_rates.columns = assets
-    missing_rates = [asset for asset, ccy in zip(assets, ccys) if ccy != base and not fxs.get(ccy)]
-    if missing_rates:
-        recorded = daily_trades.fx_to_base.unstack().reindex(columns=missing_rates)
-        recorded = _daily_frame(recorded, idx).bfill()
-        asset_rates[missing_rates] = recorded
-        available = recorded.notna().any()
-        estimated.loc[missing_rates] |= available
-        unknown.loc[missing_rates] |= ~available
+    # Align market prices & recorded prices directly into (n, n_act) NumPy arrays.
+    market_px_mat = np.full((n, n_act), np.nan, dtype=np.float64)
+    rec_px_mat = np.full((n, n_act), np.nan, dtype=np.float64)
+    aligned_ticker_cache: dict[str, np.ndarray] = {}
+    for j in range(n_act):
+        col = int(active_idx[j])
+        r_ords, r_vals = bundle.rec_px[col]
+        rec_px_mat[:, j] = _align_ord_series(r_ords, r_vals, target_ords, bfill=False)
+        tk = tickers[j]
+        if not tk:
+            continue
+        cached_col = aligned_ticker_cache.get(tk)
+        if cached_col is None:
+            rec = price_records.get(tk)
+            if rec is not None and rec.values:
+                p_ords, p_vals = _record_ord_arrays(rec)
+                ov = None
+                if nse_overlay is not None and tk.upper().endswith('.NS'):
+                    sym = tk[:-3].upper()
+                    if sym in nse_overlay[1]:
+                        ov = (nse_overlay[0], float(nse_overlay[1][sym]))
+                cached_col = _align_ord_series(p_ords, p_vals, target_ords, bfill=False, override=ov)
+            else:
+                cached_col = np.full(n, np.nan, dtype=np.float64)
+            aligned_ticker_cache[tk] = cached_col
+        market_px_mat[:, j] = cached_col
 
-    estimated_assets = estimated.index[estimated].tolist()
-    unknown_assets = unknown.index[unknown].tolist()
-    warnings = []
+    positive = qty_arr > 1e-9
+    market_isna = np.isnan(market_px_mat)
+    rec_notna = ~np.isnan(rec_px_mat)
+    estimated_flags = (market_isna & rec_notna & positive).any(axis=0)
+    prices_used = np.where(market_isna, rec_px_mat, market_px_mat)
+    prices_notna = ~np.isnan(prices_used)
+    unknown_flags = ((~prices_notna) & positive).any(axis=0)
 
-    valued_mask = (positive & prices_used.notna() & asset_rates.notna()).to_numpy()
-    qty_arr = changes.to_numpy(dtype=float)
-    cost_arr = costs.to_numpy(dtype=float)
-    px_arr = np.nan_to_num(prices_used.to_numpy(dtype=float), nan=0.0)
-    fx_arr = np.nan_to_num(asset_rates.to_numpy(dtype=float), nan=0.0)
+    # Align FX rates per unique currency, then broadcast to active assets.
+    aligned_fx: dict[str, np.ndarray] = {base: np.ones(n, dtype=np.float64)}
+    for ccy in dict.fromkeys(ccys):
+        if ccy == base:
+            continue
+        rec = fx_records.get(ccy)
+        if rec is not None and rec.values:
+            f_ords, f_vals = _record_ord_arrays(rec)
+            aligned_fx[ccy] = _align_ord_series(f_ords, f_vals, target_ords, bfill=True)
+
+    fx_mat = np.full((n, n_act), np.nan, dtype=np.float64)
+    for j in range(n_act):
+        ccy = ccys[j]
+        col_fx = aligned_fx.get(ccy)
+        if col_fx is not None:
+            fx_mat[:, j] = col_fx
+        else:
+            col = int(active_idx[j])
+            rf_ords, rf_vals = bundle.rec_fx[col]
+            rec_col = _align_ord_series(rf_ords, rf_vals, target_ords, bfill=True)
+            fx_mat[:, j] = rec_col
+            avail = bool((~np.isnan(rec_col)).any())
+            estimated_flags[j] = bool(estimated_flags[j] or avail)
+            unknown_flags[j] = bool(unknown_flags[j] or (not avail))
+
+    estimated_assets = [assets[j] for j in range(n_act) if estimated_flags[j]]
+    unknown_assets = [assets[j] for j in range(n_act) if unknown_flags[j]]
+
+    valued_mask = positive & prices_notna & (~np.isnan(fx_mat))
+    px_arr = np.nan_to_num(prices_used, nan=0.0)
+    fx_arr = np.nan_to_num(fx_mat, nan=0.0)
     val_mat = np.where(valued_mask, qty_arr * px_arr * fx_arr, 0.0)
     cost_mat = np.where(valued_mask, cost_arr, 0.0)
-    portfolio_daily = np.ascontiguousarray(val_mat).sum(axis=1)
-    invested_daily = np.ascontiguousarray(cost_mat).sum(axis=1)
-    unrealized_daily = np.ascontiguousarray(val_mat - cost_mat).sum(axis=1)
+    portfolio_daily = val_mat.sum(axis=1)
+    invested_daily = cost_mat.sum(axis=1)
+    unrealized_daily = (val_mat - cost_mat).sum(axis=1)
     cum_dev = unrealized_daily + cum_realized
 
-    if price_errors: warnings.append(f'Historical quote errors for {len(price_errors)} ticker(s).')
-    if fx_errors: warnings.append(f'Historical FX errors for {len(fx_errors)} currency pair(s); recorded transaction FX used as an estimate where possible.')
-    if estimated_assets: warnings.append('Some dates use the last trade price as an estimate where market-history quotes are missing.')
-    if unknown_assets: warnings.append('Some assets/dates have no usable quote or FX rate and are omitted from those historical totals.')
+    inv_fx_errors = {c: e for c, e in fx_errors.items() if c in ccys}
+    warnings = []
+    if price_errors:
+        warnings.append(f'Historical quote errors for {len(price_errors)} ticker(s).')
+    if inv_fx_errors:
+        warnings.append(f'Historical FX errors for {len(inv_fx_errors)} currency pair(s); recorded transaction FX used as an estimate where possible.')
+    if estimated_assets:
+        warnings.append('Some dates use the last trade price as an estimate where market-history quotes are missing.')
+    if unknown_assets:
+        warnings.append('Some assets/dates have no usable quote or FX rate and are omitted from those historical totals.')
 
     return {
         'value': portfolio_daily,
         'invested': invested_daily,
         'cum_dev': cum_dev,
-        'realized_total': all_time_realized,
+        'realized_total': bundle.all_time_realized,
         'warnings': warnings,
         'estimated_assets': sorted(set(estimated_assets)),
         'excluded_assets': sorted(set(unknown_assets)),
-        'price_count': len(prices),
+        'price_count': sum(1 for rec in price_records.values() if rec.values),
     }
 
 
-def _cash_daily_arrays(cash_df: pd.DataFrame | None, base: str, idx: pd.DatetimeIndex,
-                       start: date, end: date) -> dict:
-    """Compute daily cash value, invested cost, and cumulative FX development on idx."""
-    n = len(idx)
+def _cash_daily_arrays(
+    cash_df: pd.DataFrame | None,
+    base: str,
+    target_ords: np.ndarray,
+    start: date,
+    end: date,
+    *,
+    bundle: _DailyCashBundle | None = None,
+    preloaded_fx: tuple[dict[str, _CacheRecord], dict[str, str]] | None = None,
+    fx_expand_start: date | None = None,
+) -> dict:
+    """Compute daily cash value, invested cost, and cumulative FX development on target_ords."""
+    n = len(target_ords)
     zeros = np.zeros(n, dtype=float)
     if cash_df is None or cash_df.empty:
         return {
@@ -1267,65 +1966,85 @@ def _cash_daily_arrays(cash_df: pd.DataFrame | None, base: str, idx: pd.Datetime
         }
 
     base_u = base.upper()
-    pos_all, cost_all, realized_series, all_time_realized = _daily_cash_state(cash_df)
-    pos_daily = pos_all.reindex(idx, method='ffill').fillna(0.0)
-    cost_daily = cost_all.reindex(idx, method='ffill').fillna(0.0)
-    if not realized_series.empty:
-        cum_realized = realized_series.reindex(idx, method='ffill').fillna(0.0).to_numpy(dtype=float)
-    else:
-        cum_realized = np.zeros(n, dtype=float)
+    if bundle is None:
+        bundle = _build_daily_cash_bundle(cash_df)
 
-    active_ccys = [str(c).upper() for c in pos_daily.columns if pos_daily[c].abs().gt(1e-9).any()]
-    if not active_ccys:
+    pos = np.searchsorted(bundle.u_days_ord, target_ords, side='right') - 1
+    valid = pos >= 0
+    safe_pos = np.maximum(pos, 0)
+    pos_all = np.where(valid[:, None], bundle.pos_mat[safe_pos], 0.0)
+    cost_all = np.where(valid[:, None], bundle.cost_mat[safe_pos], 0.0)
+    cum_realized = np.where(valid, bundle.cum_realized_u[safe_pos], 0.0)
+
+    active_idx = np.flatnonzero((np.abs(pos_all) > 1e-9).any(axis=0))
+    if len(active_idx) == 0:
         return {
             'value': zeros, 'invested': zeros, 'cum_dev': cum_realized,
-            'realized_total': all_time_realized, 'warnings': [],
+            'realized_total': bundle.all_time_realized, 'warnings': [],
         }
 
-    pos_daily = pos_daily[active_ccys]
-    cost_daily = cost_daily[active_ccys]
-    market_start = start - timedelta(days=10)
-    fxs, fx_errors = get_fx_series(active_ccys, base_u, market_start, end)
+    pos_arr = pos_all[:, active_idx]
+    cost_arr = cost_all[:, active_idx]
+    active_ccys = [bundle.ccys[int(c)] for c in active_idx]
+    n_act = len(active_ccys)
 
-    rates = _daily_frame(pd.DataFrame(fxs, dtype='float64'), idx).bfill()
-    rates[base_u] = 1.0
-    ccy_rates = rates.reindex(columns=active_ccys).copy()
+    if preloaded_fx is None:
+        market_start = start - timedelta(days=10)
+        fx_records, fx_errors = _get_fx_records(active_ccys, base_u, market_start, end, False, fx_expand_start)
+    else:
+        fx_records, fx_errors = preloaded_fx
 
-    missing_ccys = [c for c in active_ccys if c != base_u and not fxs.get(c)]
-    if missing_ccys:
-        sub = cash_df[cash_df['foreign_ccy'].isin(missing_ccys)].assign(day=cash_df['date'].dt.normalize())
-        sub = sub.drop_duplicates(['day', 'foreign_ccy'], keep='last').set_index(['day', 'foreign_ccy'])
-        recorded = _daily_frame(sub['fx_rate'].unstack().reindex(columns=missing_ccys), idx).bfill()
-        ccy_rates[missing_ccys] = recorded
+    fx_mat = np.full((n, n_act), np.nan, dtype=np.float64)
+    for j, ccy in enumerate(active_ccys):
+        if ccy == base_u:
+            fx_mat[:, j] = 1.0
+            continue
+        rec = fx_records.get(ccy)
+        if rec is not None and rec.values:
+            f_ords, f_vals = _record_ord_arrays(rec)
+            fx_mat[:, j] = _align_ord_series(f_ords, f_vals, target_ords, bfill=True)
+        else:
+            rf = bundle.rec_fx.get(ccy)
+            if rf is not None:
+                fx_mat[:, j] = _align_ord_series(rf[0], rf[1], target_ords, bfill=True)
 
-    active_mask = pos_daily.abs().gt(1e-9)
-    valued_mask = (active_mask & ccy_rates.notna()).to_numpy()
-    pos_arr = pos_daily.to_numpy(dtype=float)
-    cost_arr = cost_daily.to_numpy(dtype=float)
-    fx_arr = np.nan_to_num(ccy_rates.to_numpy(dtype=float), nan=0.0)
-    val_mat = np.where(valued_mask, pos_arr * fx_arr, 0.0)
+    active_mask = np.abs(pos_arr) > 1e-9
+    valued_mask = active_mask & (~np.isnan(fx_mat))
+    fx_clean = np.nan_to_num(fx_mat, nan=0.0)
+    val_mat = np.where(valued_mask, pos_arr * fx_clean, 0.0)
     cost_mat = np.where(valued_mask, cost_arr, 0.0)
 
-    value_daily = np.ascontiguousarray(val_mat).sum(axis=1)
-    invested_daily = np.ascontiguousarray(cost_mat).sum(axis=1)
-    unrealized_daily = np.ascontiguousarray(val_mat - cost_mat).sum(axis=1)
+    value_daily = val_mat.sum(axis=1)
+    invested_daily = cost_mat.sum(axis=1)
+    unrealized_daily = (val_mat - cost_mat).sum(axis=1)
     cum_dev = unrealized_daily + cum_realized
 
+    cash_fx_errors = {c: e for c, e in fx_errors.items() if c in active_ccys}
     warnings = []
-    if fx_errors:
-        warnings.append(f'Historical cash FX errors for {len(fx_errors)} currency pair(s); recorded transaction FX used where possible.')
+    if cash_fx_errors:
+        warnings.append(f'Historical cash FX errors for {len(cash_fx_errors)} currency pair(s); recorded transaction FX used where possible.')
 
     return {
         'value': value_daily,
         'invested': invested_daily,
         'cum_dev': cum_dev,
-        'realized_total': all_time_realized,
+        'realized_total': bundle.all_time_realized,
         'warnings': warnings,
     }
 
 
-def _calculate_history(df: pd.DataFrame, cash_df: pd.DataFrame | None,
-                       base: str, span: str, mode: str) -> dict:
+def _calculate_history(
+    df: pd.DataFrame,
+    cash_df: pd.DataFrame | None,
+    base: str,
+    span: str,
+    mode: str,
+    *,
+    inv_hash_bytes: bytes | None = None,
+    cash_hash_bytes: bytes | None = None,
+    cash_computed: pd.DataFrame | None = None,
+    sibling_out: dict[str, dict] | None = None,
+) -> dict:
     """Daily Development = Unrealized P/L + Realized P/L for investments, cash, or NAV."""
     if span not in ('1M', '3M', '6M', '1Y', '3Y', 'MAX'):
         raise ValueError('Unsupported range')
@@ -1342,94 +2061,216 @@ def _calculate_history(df: pd.DataFrame, cash_df: pd.DataFrame | None,
     if mode == 'nav' and not has_inv and not has_cash:
         return empty_reply
 
+    begin = time.perf_counter()
+    inv_bundle = None
+    cash_bundle = None
+    if mode in ('investments', 'nav') and has_inv:
+        inv_key = hashlib.blake2b(inv_hash_bytes, digest_size=12).hexdigest() if inv_hash_bytes else None
+        inv_bundle = _build_daily_fifo_bundle(df, cache_key=inv_key)
+    if mode in ('cash', 'nav') and has_cash:
+        cash_key = hashlib.blake2b(cash_hash_bytes, digest_size=12).hexdigest() if cash_hash_bytes else None
+        cash_bundle = _build_daily_cash_bundle(cash_df, cache_key=cash_key, computed=cash_computed)
+
     end = date.today()
     first_candidates = []
-    if mode in ('investments', 'nav') and has_inv:
-        first_candidates.append(df.trade_date.min().date())
-    if mode in ('cash', 'nav') and has_cash:
-        first_candidates.append(cash_df['date'].min().date())
+    if inv_bundle is not None:
+        first_candidates.append(inv_bundle.first_trade_date)
+    if cash_bundle is not None:
+        first_candidates.append(cash_bundle.first_cash_date)
     first = min(first_candidates)
-    days = {'1M': 31, '3M': 92, '6M': 183, '1Y': 366, '3Y': 1096, 'MAX': 999999}[span]
-    start = first if span == 'MAX' else max(first, end - timedelta(days=days))
+    span_days = {'1M': 31, '3M': 92, '6M': 183, '1Y': 366, '3Y': 1096, 'MAX': 999999}[span]
+    start = first if span == 'MAX' else max(first, end - timedelta(days=span_days))
     if start > end:
         return empty_reply
 
-    begin = time.perf_counter()
-    idx = pd.date_range(start, end, freq='D')
+    start_ord = start.toordinal()
+    end_ord = end.toordinal()
+    target_ords = np.arange(start_ord, end_ord + 1, dtype=np.int32)
+    n_days = len(target_ords)
     rebase = (span != 'MAX' and start > first)
+    expand_full = (span != '1M')
+    fx_expand_start = (first - timedelta(days=10)) if expand_full else None
 
     if mode == 'investments':
-        inv_res = _investments_daily_arrays(df, base, idx, start, end)
-        portfolio_daily = inv_res['value']
-        invested_daily = inv_res['invested']
-        cum_dev = inv_res['cum_dev']
-        all_realized = inv_res['realized_total']
-        warnings = inv_res['warnings']
-        estimated_assets = inv_res['estimated_assets']
-        excluded_assets = inv_res['excluded_assets']
-        price_count = inv_res['price_count']
+        inv_res = _investments_daily_arrays(
+            df, base, target_ords, start, end,
+            bundle=inv_bundle, expand_to_full_held=expand_full,
+            fx_expand_start=fx_expand_start,
+        )
+        reply = _format_history_reply(
+            start_ord, n_days, span, mode, rebase,
+            inv_res['value'], inv_res['invested'], inv_res['cum_dev'],
+            inv_res['realized_total'], inv_res['warnings'],
+            inv_res['estimated_assets'], inv_res['excluded_assets'], inv_res['price_count'],
+        )
     elif mode == 'cash':
-        cash_res = _cash_daily_arrays(cash_df, base, idx, start, end)
-        portfolio_daily = cash_res['value']
-        invested_daily = cash_res['invested']
-        cum_dev = cash_res['cum_dev']
-        all_realized = cash_res['realized_total']
-        warnings = cash_res['warnings']
-        estimated_assets = []
-        excluded_assets = []
-        price_count = 0
+        cash_res = _cash_daily_arrays(
+            cash_df, base, target_ords, start, end,
+            bundle=cash_bundle, fx_expand_start=fx_expand_start,
+        )
+        reply = _format_history_reply(
+            start_ord, n_days, span, mode, rebase,
+            cash_res['value'], cash_res['invested'], cash_res['cum_dev'],
+            cash_res['realized_total'], cash_res['warnings'],
+            [], [], 0,
+        )
     else:
-        if has_inv and has_cash:
-            cjob = _coord_pool.submit(_cash_daily_arrays, cash_df, base, idx, start, end)
-            inv_res = _investments_daily_arrays(df, base, idx, start, end)
-            cash_res = cjob.result()
-        elif has_inv:
-            inv_res = _investments_daily_arrays(df, base, idx, start, end)
-            cash_res = _cash_daily_arrays(None, base, idx, start, end)
-        else:
-            inv_res = _investments_daily_arrays(pd.DataFrame(), base, idx, start, end)
-            cash_res = _cash_daily_arrays(cash_df, base, idx, start, end)
+        # NAV mode: gather union of active currencies & tickers once, batch-read DB cache once,
+        # and run Yahoo prices (_io_pool) and Frankfurter FX (_fx_pool) concurrently!
+        all_ccys: list[str] = []
+        act_i = np.empty(0, dtype=np.int64)
+        if inv_bundle is not None:
+            pos_i = np.searchsorted(inv_bundle.u_days_ord, target_ords, side='right') - 1
+            valid_i = pos_i >= 0
+            ch_i = np.where(valid_i[:, None], inv_bundle.qty_mat[np.maximum(pos_i, 0)], 0.0)
+            act_i = np.flatnonzero((ch_i > 1e-9).any(axis=0))
+            all_ccys.extend(inv_bundle.ccys[int(c)] for c in act_i)
+        if cash_bundle is not None:
+            pos_c = np.searchsorted(cash_bundle.u_days_ord, target_ords, side='right') - 1
+            valid_c = pos_c >= 0
+            ch_c = np.where(valid_c[:, None], cash_bundle.pos_mat[np.maximum(pos_c, 0)], 0.0)
+            act_c = np.flatnonzero((np.abs(ch_c) > 1e-9).any(axis=0))
+            all_ccys.extend(cash_bundle.ccys[int(c)] for c in act_c)
+        all_ccys = list(dict.fromkeys(all_ccys))
+
+        base_u = base.upper()
+        market_start = start - timedelta(days=10)
+        t_bounds = (
+            _compute_inv_ticker_bounds(inv_bundle, act_i, market_start, end, expand_full)
+            if (inv_bundle is not None and len(act_i) > 0) else {}
+        )
+        p_keys = {t: 'price:' + t for t in t_bounds}
+        fx_keys_list = [f'fx:{c}:{base_u}' for c in all_ccys if c != base_u]
+        if p_keys or fx_keys_list:
+            _read_cached(list(p_keys.values()) + fx_keys_list)
+
+        fx_future = (
+            _coord_pool.submit(_get_fx_records, all_ccys, base_u, market_start, end, False, fx_expand_start)
+            if fx_keys_list else None
+        )
+        preloaded_prices = (
+            _series_records_with_windows(p_keys, t_bounds, False, _HIST_REFRESH_HOURS, _fetch_chart, pool=_io_pool)
+            if p_keys else ({}, {})
+        )
+        preloaded_fx = fx_future.result() if fx_future is not None else ({}, {})
+
+        inv_res = _investments_daily_arrays(
+            df if has_inv else pd.DataFrame(), base, target_ords, start, end,
+            bundle=inv_bundle, expand_to_full_held=expand_full,
+            preloaded_fx=preloaded_fx, preloaded_prices=preloaded_prices,
+        )
+        cash_res = _cash_daily_arrays(
+            cash_df if has_cash else None, base, target_ords, start, end,
+            bundle=cash_bundle, preloaded_fx=preloaded_fx,
+        )
         portfolio_daily = inv_res['value'] + cash_res['value']
         invested_daily = inv_res['invested'] + cash_res['invested']
         cum_dev = inv_res['cum_dev'] + cash_res['cum_dev']
         all_realized = inv_res['realized_total'] + cash_res['realized_total']
         warnings = list(dict.fromkeys(inv_res['warnings'] + cash_res['warnings']))
-        estimated_assets = inv_res['estimated_assets']
-        excluded_assets = inv_res['excluded_assets']
-        price_count = inv_res['price_count']
 
-    baseline = float(cum_dev[0]) if rebase else 0.0
-    dev_series = cum_dev - baseline
+        reply = _format_history_reply(
+            start_ord, n_days, span, mode, rebase,
+            portfolio_daily, invested_daily, cum_dev,
+            all_realized, warnings,
+            inv_res['estimated_assets'], inv_res['excluded_assets'], inv_res['price_count'],
+        )
+        # Populate sibling modes when their start date & rebase flag match this NAV window.
+        if sibling_out is not None:
+            if inv_bundle is not None:
+                f_inv = inv_bundle.first_trade_date
+                s_inv = f_inv if span == 'MAX' else max(f_inv, end - timedelta(days=span_days))
+                r_inv = (span != 'MAX' and s_inv > f_inv)
+                if s_inv == start and r_inv == rebase:
+                    sibling_out['investments'] = _format_history_reply(
+                        start_ord, n_days, span, 'investments', r_inv,
+                        inv_res['value'], inv_res['invested'], inv_res['cum_dev'],
+                        inv_res['realized_total'], inv_res['warnings'],
+                        inv_res['estimated_assets'], inv_res['excluded_assets'], inv_res['price_count'],
+                    )
+            if cash_bundle is not None:
+                f_cash = cash_bundle.first_cash_date
+                s_cash = f_cash if span == 'MAX' else max(f_cash, end - timedelta(days=span_days))
+                r_cash = (span != 'MAX' and s_cash > f_cash)
+                if s_cash == start and r_cash == rebase:
+                    sibling_out['cash'] = _format_history_reply(
+                        start_ord, n_days, span, 'cash', r_cash,
+                        cash_res['value'], cash_res['invested'], cash_res['cum_dev'],
+                        cash_res['realized_total'], cash_res['warnings'],
+                        [], [], 0,
+                    )
 
-    max_points = 920
-    step = max(1, int(np.ceil(len(idx) / max_points)))
-    take = np.arange(0, len(idx), step)
-    if take[-1] != len(idx) - 1:
-        take = np.r_[take, len(idx) - 1]
-    points = [
-        {
-            'date': idx[i].date().isoformat(),
-            'value': round(float(dev_series[i]), 2),
-            'portfolio_value': round(float(portfolio_daily[i]), 2),
-            'invested': round(float(invested_daily[i]), 2),
-        }
-        for i in take
-    ]
     _LOG.info('market.history mode=%s span=%s total_seconds=%.2f points=%d',
-              mode, span, time.perf_counter() - begin, len(points))
-    return {
-        'points': points,
-        'range': span,
-        'mode': mode,
-        'warnings': warnings,
-        'estimated_assets': estimated_assets,
-        'excluded_assets': excluded_assets,
-        'price_count': price_count,
-        'baseline': round(baseline, 2),
-        'development': round(float(dev_series[-1]), 2),
-        'realized_total': round(all_realized, 2),
-        'source': 'Daily development (Unrealized P/L + Realized P/L) using Yahoo Finance daily closes + Frankfurter FX',
-    }
+              mode, span, time.perf_counter() - begin, len(reply['points']))
+    return reply
+
+
+def warm_history_cache(
+    df: pd.DataFrame | None,
+    cash_df: pd.DataFrame | None,
+    base: str,
+    *,
+    inv_hash_bytes: bytes | None = None,
+    cash_hash_bytes: bytes | None = None,
+    cash_computed: pd.DataFrame | None = None,
+) -> None:
+    """Gentle, deduplicated background warm-up of exact held price & FX history after initial 1M load."""
+    has_inv = df is not None and not df.empty
+    has_cash = cash_df is not None and not cash_df.empty
+    if not has_inv and not has_cash:
+        return
+    inv_k = hashlib.blake2b(inv_hash_bytes, digest_size=12).hexdigest() if inv_hash_bytes else ''
+    cash_k = hashlib.blake2b(cash_hash_bytes, digest_size=12).hexdigest() if cash_hash_bytes else ''
+    warm_key = ('hist-warm', base.upper(), inv_k, cash_k, date.today().isoformat())
+    now = time.monotonic()
+    with _cache_lock:
+        if _warmed_keys.get(warm_key, 0.0) > now:
+            return
+        _warmed_keys[warm_key] = now + 1800.0
+        _warmed_keys.move_to_end(warm_key)
+        while len(_warmed_keys) > 64:
+            _warmed_keys.popitem(last=False)
+
+    def _run():
+        try:
+            end = date.today()
+            first_dates = []
+            ccys: list[str] = []
+            ticker_bounds: dict[str, tuple[date, date, date | None]] = {}
+            if has_inv:
+                ib = _build_daily_fifo_bundle(df, cache_key=inv_k or None)
+                first_dates.append(ib.first_trade_date)
+                all_idx = np.flatnonzero((ib.qty_mat > 1e-9).any(axis=0))
+                if len(all_idx):
+                    m_start = ib.first_trade_date - timedelta(days=10)
+                    ticker_bounds = _compute_inv_ticker_bounds(ib, all_idx, m_start, end, expand_to_full_held=True)
+                    ccys.extend(ib.ccys[int(c)] for c in all_idx)
+            if has_cash:
+                cb = _build_daily_cash_bundle(cash_df, cache_key=cash_k or None, computed=cash_computed)
+                first_dates.append(cb.first_cash_date)
+                ccys.extend(cb.ccys)
+            if not first_dates:
+                return
+            first_all = min(first_dates)
+            fx_start = first_all - timedelta(days=10)
+            ccys = list(dict.fromkeys(ccys))
+            base_u = base.upper()
+            p_keys = {t: 'price:' + t for t in ticker_bounds}
+            fx_keys_list = [f'fx:{c}:{base_u}' for c in ccys if c != base_u]
+            if p_keys or fx_keys_list:
+                _read_cached(list(p_keys.values()) + fx_keys_list)
+            f_fut = (
+                _coord_pool.submit(_get_fx_records, ccys, base_u, fx_start, end, False, None, _fx_pool)
+                if fx_keys_list else None
+            )
+            if p_keys:
+                _series_records_with_windows(p_keys, ticker_bounds, False, _HIST_REFRESH_HOURS, _fetch_chart, pool=_bg_io_pool)
+            if f_fut is not None:
+                f_fut.result()
+        except Exception:
+            _LOG.debug('Background history warm-up skipped', exc_info=True)
+
+    _bg_pool.submit(_run)
 
 
 def _calculate_portfolio_history(df: pd.DataFrame, base: str, span: str) -> dict:
